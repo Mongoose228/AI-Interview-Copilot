@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "interview-copilot"
+version = "0.1.0"
+description = "AI Interview Copilot"
+readme = "README.md"
+requires-python = ">=3.11, <3.12"
+dependencies = [
+    "SoundCard==0.4.6",
+    "numpy==2.4.6",
+    "cffi",
+    "soxr==1.1.0",
+    "silero-vad==6.2.1",
+    "onnxruntime==1.28.0",
+    "faster-whisper==1.2.1",
+    "ctranslate2==4.8.1",
+    "deepl==1.30.0",
+    "openai==2.49.0",
+    "pydantic==2.13.4",
+    "pydantic-settings==2.14.2",
+    "PySide6==6.11.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "pytest-mock==3.15.1",
+    "ruff==0.16.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/interview_copilot"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-ra -q"
+testpaths = ["tests"]
