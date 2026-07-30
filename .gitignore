@@ -1,8 +1,11 @@
+# Environment & Secrets
+.env
+.env*.local
 
+# Python & Caches
 __pycache__/
 *.py[cod]
-*.class
-.env
+*$py.class
 .venv/
 env/
 venv/
@@ -12,7 +15,23 @@ venv.bak/
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
+
+# Audio & Logs
 *.wav
 *.mp3
+*.log
+
+# App state
 .copilot_state.json
 
+# IDEs & OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Packaging & Build
+build/
+dist/
+*.egg-info/
