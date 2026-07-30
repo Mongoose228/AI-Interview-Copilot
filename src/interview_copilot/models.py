@@ -7,7 +7,7 @@ import numpy as np
 @dataclass(frozen=True)
 class AudioChunk:
     id: uuid.UUID
-    data: bytes
+    data: np.ndarray
     sample_rate: int
     channels: int
     captured_at: float

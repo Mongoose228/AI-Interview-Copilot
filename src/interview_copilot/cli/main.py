@@ -37,8 +37,8 @@ def cmd_capture_test(args):
         backend.start(device_id=device_id)
         while True:
             chunk = backend.read_chunk()
-            # chunk.data is float32 bytes
-            samples = np.frombuffer(chunk.data, dtype=np.float32)
+            # chunk.data is float32 ndarray
+            samples = chunk.data.flatten()
             if len(samples) > 0:
                 rms = np.sqrt(np.mean(samples**2))
                 # Print a simple bar based on RMS

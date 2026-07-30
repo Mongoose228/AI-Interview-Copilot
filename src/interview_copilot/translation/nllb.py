@@ -5,33 +5,31 @@ from .base import Translator
 
 class NLLBTranslator(Translator):
     def __init__(self):
-        self._enabled = config.NLLB_ENABLED
         self._model_name = config.NLLB_MODEL
         self._tokenizer = None
         self._model = None
+        self._ready = False
 
-        if self._enabled:
-            try:
-                from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+        try:
+            from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
-                logger.info(f"Initializing NLLB model '{self._model_name}'...")
+            logger.info(f"Initializing NLLB model '{self._model_name}'...")
 
-                # NLLB translation (EN -> RU)
-                self._tokenizer = AutoTokenizer.from_pretrained(
-                    self._model_name, src_lang="eng_Latn"
-                )
-                self._model = AutoModelForSeq2SeqLM.from_pretrained(self._model_name)
+            # NLLB translation (EN -> RU)
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                self._model_name, src_lang="eng_Latn"
+            )
+            self._model = AutoModelForSeq2SeqLM.from_pretrained(self._model_name)
+            self._ready = True
 
-                logger.info("NLLB Translator initialized successfully.")
-            except ImportError:
-                logger.error("transformers or torch not installed. Cannot use NLLB.")
-                self._enabled = False
-            except Exception as e:
-                logger.error(f"Failed to initialize NLLB: {e}")
-                self._enabled = False
+            logger.info("NLLB Translator initialized successfully.")
+        except ImportError:
+            logger.error("transformers or torch not installed. Cannot use NLLB.")
+        except Exception as e:
+            logger.error(f"Failed to initialize NLLB: {e}")
 
     def translate(self, text: str, source_lang: str = "EN", target_lang: str = "RU") -> str | None:
-        if not self._enabled or not self._model or not self._tokenizer or not text:
+        if not self._ready or not self._model or not self._tokenizer or not text:
             return None
 
         # DeepL used EN/RU. NLLB uses eng_Latn/rus_Cyrl.

@@ -1,15 +1,26 @@
+import ctypes
+import sys
+
 from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QPushButton,
     QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
 from ..models import PipelineResult
+
+# Maximum number of result cards to keep in the overlay
+_MAX_RESULT_CARDS = 50
+
+# Windows constants for SetWindowDisplayAffinity
+WDA_EXCLUDEFROMCAPTURE = 0x00000011
 
 
 class ResultWidget(QFrame):
@@ -88,12 +99,37 @@ class CopilotMainWindow(QMainWindow):
         self.main_layout = QVBoxLayout(self.central_widget)
         self.main_layout.setContentsMargins(15, 15, 15, 15)
 
-        # Header (Drag handle)
+        # Header (Drag handle + close button)
         self.header_layout = QHBoxLayout()
         self.title_lbl = QLabel("AI Interview Copilot")
         self.title_lbl.setStyleSheet("color: #FFFFFF; font-size: 16px; font-weight: bold;")
         self.header_layout.addWidget(self.title_lbl)
         self.header_layout.addStretch()
+
+        # Status label (shown during loading)
+        self.status_lbl = QLabel("")
+        self.status_lbl.setStyleSheet("color: #888888; font-size: 12px;")
+        self.header_layout.addWidget(self.status_lbl)
+
+        # Close button
+        self.close_btn = QPushButton("✕")
+        self.close_btn.setFixedSize(28, 28)
+        self.close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(255, 255, 255, 0.1);
+                color: #AAAAAA;
+                border: none;
+                border-radius: 14px;
+                font-size: 14px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: rgba(255, 60, 60, 0.6);
+                color: #FFFFFF;
+            }
+        """)
+        self.close_btn.clicked.connect(self.close)
+        self.header_layout.addWidget(self.close_btn)
 
         self.main_layout.addLayout(self.header_layout)
 
@@ -113,6 +149,43 @@ class CopilotMainWindow(QMainWindow):
         # For dragging the frameless window
         self._drag_pos = None
 
+        # Track result widgets for ring buffer eviction
+        self._result_widgets: list[ResultWidget] = []
+
+        # Keyboard shortcut: Escape to close
+        shortcut_esc = QShortcut(QKeySequence(Qt.Key_Escape), self)
+        shortcut_esc.activated.connect(self.close)
+
+    def show(self):
+        super().show()
+        self._apply_display_affinity()
+
+    def _apply_display_affinity(self):
+        """Hide this window from screen capture (OBS, Zoom, etc.) on Windows."""
+        if sys.platform != "win32":
+            return
+        try:
+            hwnd = int(self.winId())
+            user32 = ctypes.windll.user32
+            # WDA_EXCLUDEFROMCAPTURE = 0x11 (Windows 10 2004+)
+            result = user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)
+            if result:
+                from ..logging_config import logger
+                logger.info("Window display affinity set: excluded from screen capture.")
+            else:
+                from ..logging_config import logger
+                logger.warning(
+                    "Failed to set window display affinity. "
+                    "Window may be visible in screen capture."
+                )
+        except Exception as e:
+            from ..logging_config import logger
+            logger.warning(f"SetWindowDisplayAffinity not available: {e}")
+
+    def set_status(self, text: str):
+        """Update the status label in the header."""
+        self.status_lbl.setText(text)
+
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self._drag_pos = event.globalPosition().toPoint()
@@ -131,6 +204,13 @@ class CopilotMainWindow(QMainWindow):
         """Called via signal when a new result is ready."""
         widget = ResultWidget(result)
         self.scroll_layout.addWidget(widget)
+        self._result_widgets.append(widget)
+
+        # Ring buffer: evict oldest cards when exceeding limit
+        while len(self._result_widgets) > _MAX_RESULT_CARDS:
+            oldest = self._result_widgets.pop(0)
+            self.scroll_layout.removeWidget(oldest)
+            oldest.deleteLater()
 
         # Auto-scroll to bottom
         QTimer.singleShot(50, self._scroll_to_bottom)

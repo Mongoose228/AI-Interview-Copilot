@@ -11,7 +11,13 @@ from ..models import ProfileSnapshot
 class ProfileManager:
     def __init__(self):
         self._context_dir = config.CONTEXT_DIR
-        self._state_file = ".copilot_state.json"
+
+        # Store state in %APPDATA% (or fallback to CWD) to avoid CWD dependency
+        appdata = os.environ.get("APPDATA", ".")
+        state_dir = os.path.join(appdata, "interview_copilot")
+        if not os.path.exists(state_dir):
+            os.makedirs(state_dir, exist_ok=True)
+        self._state_file = os.path.join(state_dir, ".copilot_state.json")
 
         # Ensure context dir exists
         if not os.path.exists(self._context_dir):

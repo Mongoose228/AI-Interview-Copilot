@@ -1,5 +1,6 @@
 import json
 
+import httpx
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 
@@ -16,21 +17,36 @@ class OpenRouterResponseFormat(BaseModel):
     )
 
 
+def _build_strict_schema() -> dict:
+    """Build JSON schema with additionalProperties: false for strict mode."""
+    schema = OpenRouterResponseFormat.model_json_schema()
+    schema["additionalProperties"] = False
+    return schema
+
+
 class OpenRouterSuggester:
     def __init__(self):
         self._api_key = config.OPENROUTER_API_KEY
         self._base_url = config.OPENROUTER_BASE_URL
         self._model = config.OPENROUTER_MODEL
-        self._timeout = config.NETWORK_TIMEOUT_SECONDS
         self._client = None
 
-        if not self._api_key or not self._model:
+        if not self._api_key:
             logger.warning(
-                "OpenRouter API key or model not configured. Suggestions will be disabled."
+                "OpenRouter API key not configured. Suggestions will be disabled."
             )
         else:
+            timeout = httpx.Timeout(
+                connect=config.NETWORK_CONNECT_TIMEOUT,
+                read=config.NETWORK_READ_TIMEOUT,
+                write=config.NETWORK_CONNECT_TIMEOUT,
+                pool=config.NETWORK_CONNECT_TIMEOUT,
+            )
             self._client = AsyncOpenAI(
-                api_key=self._api_key, base_url=self._base_url, timeout=self._timeout
+                api_key=self._api_key,
+                base_url=self._base_url,
+                timeout=timeout,
+                max_retries=2,
             )
             logger.info(f"OpenRouter Suggester initialized with model {self._model}.")
 
@@ -77,7 +93,7 @@ class OpenRouterSuggester:
                     "type": "json_schema",
                     "json_schema": {
                         "name": "suggestion_schema",
-                        "schema": OpenRouterResponseFormat.model_json_schema(),
+                        "schema": _build_strict_schema(),
                         "strict": True,
                     },
                 },
@@ -94,12 +110,12 @@ class OpenRouterSuggester:
                 if result_text.endswith("```"):
                     result_text = result_text[:-3]
                 result_text = result_text.strip()
-                
+
                 data = json.loads(result_text)
                 return SuggestionResult(
                     answer_en=data.get("answer_en", ""),
                     answer_ru=data.get("answer_ru", ""),
-                    needs_verification=data.get("needs_verification", False)
+                    needs_verification=data.get("needs_verification", False),
                 )
 
             return None

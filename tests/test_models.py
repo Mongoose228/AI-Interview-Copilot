@@ -1,6 +1,7 @@
 import uuid
 from dataclasses import FrozenInstanceError
 
+import numpy as np
 import pytest
 
 from interview_copilot.models import (
@@ -11,7 +12,11 @@ from interview_copilot.models import (
 
 def test_audio_chunk_immutability():
     chunk = AudioChunk(
-        id=uuid.uuid4(), data=b"fake_data", sample_rate=16000, channels=1, captured_at=123.45
+        id=uuid.uuid4(),
+        data=np.zeros(16000, dtype=np.float32),
+        sample_rate=16000,
+        channels=1,
+        captured_at=123.45,
     )
 
     assert chunk.sample_rate == 16000

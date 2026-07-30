@@ -76,7 +76,7 @@ class WhisperEngine:
             try:
                 segments, info = self._model.transcribe(
                     phrase.audio_data,
-                    beam_size=5,
+                    beam_size=config.WHISPER_BEAM_SIZE,
                     language="en",
                     condition_on_previous_text=False,
                     vad_filter=False,  # We already do VAD

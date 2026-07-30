@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from interview_copilot.audio.base import AudioCaptureBackend
-from interview_copilot.models import AudioChunk, Transcript
+from interview_copilot.models import AudioChunk, SpeechPhrase, Transcript
 from interview_copilot.translation.base import Translator
 
 
@@ -30,7 +30,7 @@ class FakeAudioCapture(AudioCaptureBackend):
 
         self._chunk_count += 1
         # generate a fake chunk of 30ms at 48000Hz (1440 samples), stereo, float32
-        data = np.zeros((1440, 2), dtype=np.float32).tobytes()
+        data = np.zeros((1440, 2), dtype=np.float32)
         return AudioChunk(
             id=uuid.uuid4(), data=data, sample_rate=48000, channels=2, captured_at=time.time()
         )
@@ -56,9 +56,9 @@ class FakeWhisperEngine:
     def warm_up(self):
         pass
 
-    def transcribe(self, audio: np.ndarray) -> Transcript:
+    def transcribe(self, phrase: SpeechPhrase) -> Transcript:
         return Transcript(
-            phrase_id=uuid.uuid4(),
+            phrase_id=phrase.id,
             text_en=self.fake_text,
             language="en",
             confidence=0.99,

@@ -5,7 +5,7 @@ import time
 
 from .audio.soundcard_wasapi import SoundCardWASAPIBackend
 from .config import config
-from .logging_config import logger
+from .logging_config import log_sensitive, logger
 from .models import PipelineResult, Transcript
 from .stt.whisper_engine import WhisperEngine
 from .suggestion.openrouter import OpenRouterSuggester
@@ -14,6 +14,12 @@ from .translation.deepl import DeepLTranslator
 from .translation.nllb import NLLBTranslator
 from .vad.silero import SileroVAD
 
+# Maximum transcript history to prevent unbounded memory growth
+_MAX_HISTORY = 100
+# Maximum retry attempts for audio device reconnection
+_MAX_AUDIO_RETRIES = 5
+_AUDIO_RETRY_BASE_DELAY = 1.0  # seconds
+
 
 class InterviewPipeline:
     def __init__(self):
@@ -21,17 +27,12 @@ class InterviewPipeline:
         self.vad = SileroVAD()
         self.stt = WhisperEngine()
 
-        # Translation strategy
+        # Translation strategy — single config key
         self.translator = None
-        if config.LOCAL_TRANSLATION_ENABLED:
-            if config.NLLB_ENABLED:
-                self.translator = NLLBTranslator()
-            else:
-                self.translator = DeepLTranslator()
-                # Fallback to NLLB if DeepL fails (e.g. no key)
-                if not getattr(self.translator, "_translator", None):
-                    logger.info("DeepL not available, falling back to NLLB...")
-                    self.translator = NLLBTranslator()
+        if config.TRANSLATION_BACKEND == "deepl":
+            self.translator = DeepLTranslator()
+        elif config.TRANSLATION_BACKEND == "nllb":
+            self.translator = NLLBTranslator()
 
         self.suggester = OpenRouterSuggester()
         self.profile_mgr = ProfileManager()
@@ -44,30 +45,77 @@ class InterviewPipeline:
 
         # Callbacks
         self._result_callback = None
+        self._audio_status_callback = None
 
-        # History
+        # History (bounded)
         self.transcript_history: list[Transcript] = []
+
+        # Track active suggestion task for cancellation
+        self._current_suggestion_task: asyncio.Task | None = None
 
     def set_result_callback(self, callback):
         self._result_callback = callback
 
+    def set_audio_status_callback(self, callback):
+        """Callback for audio device status changes: callback(is_connected: bool, message: str)"""
+        self._audio_status_callback = callback
+
     def _capture_and_vad_worker(self, device_id: str = None):
         logger.info("Audio capture thread started.")
-        self.audio.start(device_id)
-        try:
-            while not self._stop_event.is_set():
-                chunk = self.audio.read_chunk()
-                phrases = self.vad.process_chunk(chunk)
-                for p in phrases:
-                    try:
-                        self.phrase_queue.put(p, timeout=1.0)
-                    except queue.Full:
-                        logger.warning("Phrase queue is full, dropping phrase.")
-        except Exception as e:
-            logger.error(f"Capture worker error: {e}")
-        finally:
-            self.audio.stop()
-            logger.info("Audio capture thread stopped.")
+        retries = 0
+
+        while not self._stop_event.is_set():
+            try:
+                self.audio.start(device_id)
+                self.vad.reset()  # Reset VAD state on (re)start
+                retries = 0  # Reset retry counter on successful start
+
+                if self._audio_status_callback:
+                    self._audio_status_callback(True, "Audio capture active")
+
+                while not self._stop_event.is_set():
+                    chunk = self.audio.read_chunk()
+                    phrases = self.vad.process_chunk(chunk)
+                    for p in phrases:
+                        try:
+                            self.phrase_queue.put(p, timeout=1.0)
+                        except queue.Full:
+                            logger.warning("Phrase queue is full, dropping phrase.")
+
+            except Exception as e:
+                logger.error(f"Capture worker error: {e}")
+                try:
+                    self.audio.stop()
+                except Exception:
+                    pass
+
+                retries += 1
+                if retries > _MAX_AUDIO_RETRIES:
+                    logger.error(
+                        f"Audio capture failed after {_MAX_AUDIO_RETRIES} retries. Giving up."
+                    )
+                    if self._audio_status_callback:
+                        self._audio_status_callback(False, f"Audio device lost: {e}")
+                    break
+
+                delay = _AUDIO_RETRY_BASE_DELAY * (2 ** (retries - 1))
+                logger.warning(
+                    f"Audio capture failed, retrying in {delay:.1f}s "
+                    f"(attempt {retries}/{_MAX_AUDIO_RETRIES})"
+                )
+                if self._audio_status_callback:
+                    self._audio_status_callback(
+                        False, f"Reconnecting... ({retries}/{_MAX_AUDIO_RETRIES})"
+                    )
+                self._stop_event.wait(delay)
+
+            finally:
+                try:
+                    self.audio.stop()
+                except Exception:
+                    pass
+
+        logger.info("Audio capture thread stopped.")
 
     def _stt_worker(self):
         logger.info("STT thread started.")
@@ -86,6 +134,49 @@ class InterviewPipeline:
                 logger.error(f"STT worker error: {e}")
         logger.info("STT thread stopped.")
 
+    async def _process_transcript(self, transcript: Transcript, active_profile):
+        """Process a single transcript: translate + get suggestion concurrently."""
+        # Build tasks for concurrent execution
+        translation_coro = None
+        suggestion_coro = None
+
+        if self.translator:
+            translation_coro = asyncio.to_thread(
+                self.translator.translate, transcript.text_en
+            )
+
+        if active_profile:
+            suggestion_coro = self.suggester.get_suggestion(
+                self.transcript_history, active_profile
+            )
+
+        # Run translation and suggestion concurrently
+        translation_ru = None
+        suggestion = None
+
+        if translation_coro and suggestion_coro:
+            translation_ru, suggestion = await asyncio.gather(
+                translation_coro, suggestion_coro
+            )
+        elif translation_coro:
+            translation_ru = await translation_coro
+        elif suggestion_coro:
+            suggestion = await suggestion_coro
+
+        # Create final result
+        result = PipelineResult(
+            id=transcript.phrase_id,
+            transcript=transcript.text_en,
+            translation_ru=translation_ru,
+            suggestion=suggestion,
+            profile=active_profile,
+            created_at=time.time(),
+        )
+
+        self._display_result(result)
+        if self._result_callback:
+            self._result_callback(result)
+
     async def _async_orchestrator(self):
         logger.info("Async orchestrator started.")
         active_profile = self.profile_mgr.load_active_profile()
@@ -100,47 +191,51 @@ class InterviewPipeline:
 
             self.transcript_history.append(transcript)
 
-            # 1. Translate
-            translation_ru = None
-            if self.translator:
-                translation_ru = await asyncio.to_thread(
-                    self.translator.translate, transcript.text_en
-                )
+            # Trim history to prevent unbounded growth
+            if len(self.transcript_history) > _MAX_HISTORY:
+                self.transcript_history = self.transcript_history[-_MAX_HISTORY:]
 
-            # 2. Suggestion
-            suggestion = None
-            if active_profile:
-                suggestion = await self.suggester.get_suggestion(
-                    self.transcript_history, active_profile
-                )
+            # Cancel stale suggestion task if still running
+            if self._current_suggestion_task and not self._current_suggestion_task.done():
+                self._current_suggestion_task.cancel()
+                try:
+                    await self._current_suggestion_task
+                except (asyncio.CancelledError, Exception):
+                    pass
 
-            # Create final result
-            result = PipelineResult(
-                id=transcript.phrase_id,
-                transcript=transcript.text_en,
-                translation_ru=translation_ru,
-                suggestion=suggestion,
-                profile=active_profile,
-                created_at=time.time(),
+            # Launch processing as a task (non-blocking)
+            self._current_suggestion_task = asyncio.create_task(
+                self._process_transcript(transcript, active_profile)
             )
 
-            self._display_result(result)
-            if self._result_callback:
-                self._result_callback(result)
+        # Cleanup: cancel any remaining task
+        if self._current_suggestion_task and not self._current_suggestion_task.done():
+            self._current_suggestion_task.cancel()
 
         logger.info("Async orchestrator stopped.")
 
     def _display_result(self, result: PipelineResult):
-        print("\n" + "=" * 60)
-        print(f"🗣️  [EN]: {result.transcript}")
-        if result.translation_ru:
-            print(f"🇷🇺  [RU]: {result.translation_ru}")
-        if result.suggestion:
-            print("-" * 60)
-            verify_mark = "⚠️ (VERIFY)" if result.suggestion.needs_verification else "✅"
-            print(f"💡 [AI EN] {verify_mark}: {result.suggestion.answer_en}")
-            print(f"💡 [AI RU]: {result.suggestion.answer_ru}")
-        print("=" * 60 + "\n")
+        if config.PRIVACY_MODE:
+            # In privacy mode, only log metadata
+            logger.info(
+                f"[Result] id={result.id} "
+                f"has_translation={result.translation_ru is not None} "
+                f"has_suggestion={result.suggestion is not None}"
+            )
+        else:
+            print("\n" + "=" * 60)
+            log_sensitive(f"[EN]: {result.transcript}")
+            print(f"🗣️  [EN]: {result.transcript}")
+            if result.translation_ru:
+                log_sensitive(f"[RU]: {result.translation_ru}")
+                print(f"🇷🇺  [RU]: {result.translation_ru}")
+            if result.suggestion:
+                print("-" * 60)
+                verify_mark = "⚠️ (VERIFY)" if result.suggestion.needs_verification else "✅"
+                log_sensitive(f"[AI EN]: {result.suggestion.answer_en}")
+                print(f"💡 [AI EN] {verify_mark}: {result.suggestion.answer_en}")
+                print(f"💡 [AI RU]: {result.suggestion.answer_ru}")
+            print("=" * 60 + "\n")
 
     async def start(self, device_id: str = None):
         self._stop_event.clear()
@@ -165,5 +260,6 @@ class InterviewPipeline:
 
     def stop(self):
         self._stop_event.set()
+        self.vad.reset()  # Reset VAD state on stop
         for t in self._threads:
             t.join(timeout=2.0)

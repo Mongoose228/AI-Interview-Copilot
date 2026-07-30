@@ -1,4 +1,5 @@
 import uuid
+from collections import deque
 
 import numpy as np
 
@@ -7,21 +8,24 @@ from ..logging_config import logger
 from ..models import AudioChunk, SpeechPhrase
 from .resampler import Resampler
 
+# Pre-roll buffer size: ~500ms at 16kHz in 512-sample chunks ≈ 15 chunks
+_PREROLL_CHUNKS = 15
+
 
 class SileroVAD:
     def __init__(self):
-        # We load model from torch hub locally or package it.
-        # But for Silero VAD we need the ONNX file.
-        # Actually, the user installed `silero-vad==6.2.1` python package?
-        # No, silero-vad might be a package but let's check how to initialize it.
-        # Usually, `silero_vad` library provides `load_silero_vad()`.
-        # Let's import it safely.
         try:
-            from silero_vad import get_speech_timestamps, load_silero_vad
+            from silero_vad import load_silero_vad
             from silero_vad.utils_vad import VADIterator
 
             self._model = load_silero_vad(onnx=True)
-            self._iterator = VADIterator(self._model)
+            self._iterator = VADIterator(
+                self._model,
+                threshold=config.VAD_THRESHOLD,
+                sampling_rate=16000,
+                min_silence_duration_ms=config.VAD_SILENCE_MS,
+                speech_pad_ms=config.VAD_SPEECH_PAD_MS,
+            )
             self._vad_lib_available = True
         except ImportError:
             logger.error("silero_vad package not found or incompatible.")
@@ -36,6 +40,20 @@ class SileroVAD:
         self._is_speaking = False
         self._current_phrase_start_time = 0.0
         self._sample_buffer = np.array([], dtype=np.float32)
+
+        # Pre-roll ring buffer: keeps last N chunks so we don't clip speech onset
+        self._preroll_buffer: deque[np.ndarray] = deque(maxlen=_PREROLL_CHUNKS)
+
+    def reset(self):
+        """Reset VAD internal state. Call on capture start/stop to prevent drift."""
+        if self._vad_lib_available:
+            self._iterator.reset_states()
+        self._phrase_buffer = []
+        self._phrase_duration_ms = 0
+        self._is_speaking = False
+        self._current_phrase_start_time = 0.0
+        self._sample_buffer = np.array([], dtype=np.float32)
+        self._preroll_buffer.clear()
 
     def _ensure_resampler(self, in_rate: int, in_channels: int):
         if self._resampler is None or self._resampler.in_rate != in_rate:
@@ -71,9 +89,11 @@ class SileroVAD:
                 if result:
                     if "start" in result:
                         self._is_speaking = True
-                        self._phrase_buffer = [vad_chunk]
+                        # Include pre-roll buffer to avoid clipping speech onset
+                        self._phrase_buffer = list(self._preroll_buffer)
+                        self._phrase_buffer.append(vad_chunk)
                         self._current_phrase_start_time = chunk.captured_at
-                        self._phrase_duration_ms = 512 / 16.0
+                        self._phrase_duration_ms = len(self._phrase_buffer) * (512 / 16.0)
                     elif "end" in result:
                         self._is_speaking = False
                         self._phrase_buffer.append(vad_chunk)
@@ -115,6 +135,9 @@ class SileroVAD:
                             self._phrase_buffer = []
                             self._phrase_duration_ms = 0
                             self._current_phrase_start_time = chunk.captured_at
+                    else:
+                        # Not speaking: feed pre-roll buffer
+                        self._preroll_buffer.append(vad_chunk)
 
             except Exception as e:
                 logger.error(f"VAD Error: {e}")

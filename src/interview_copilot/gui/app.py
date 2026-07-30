@@ -4,7 +4,6 @@ import threading
 
 from PySide6.QtWidgets import QApplication
 
-from ..config import config
 from ..logging_config import logger
 from ..pipeline import InterviewPipeline
 from .main_window import CopilotMainWindow
@@ -46,42 +45,46 @@ def start_gui(device_id: str = None):
 
     signals = PipelineSignals()
 
-    # Initialize pipeline
-    pipeline = InterviewPipeline()
-
-    # Provide a callback to the pipeline that emits the Qt signal
-    def on_result(result):
-        signals.result_ready.emit(result)
-
-    pipeline.set_result_callback(on_result)
-
-    # Run the pipeline in a separate thread so it doesn't block the Qt Event Loop
-    def run_pipeline():
-        # new event loop for this thread because pipeline uses asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(pipeline.start(device_id))
-        except Exception as e:
-            logger.error(f"Pipeline thread error: {e}")
-        finally:
-            loop.close()
-
-    pipeline_thread = threading.Thread(target=run_pipeline, daemon=True)
-    pipeline_thread.start()
-
-    # Create and show window
+    # Create and show window IMMEDIATELY — before pipeline init
     window = CopilotMainWindow()
+    window.set_status("⏳ Loading models...")
+    window.show()
 
     # Connect signals
     signals.result_ready.connect(window.add_result)
 
-    window.show()
+    # Initialize and run pipeline in a background thread
+    # This prevents "Not Responding" while Whisper downloads/warms up
+    def run_pipeline():
+        try:
+            # Heavy initialization happens here, in the background thread
+            pipeline = InterviewPipeline()
+
+            # Signal that loading is complete
+            window.set_status("")
+
+            # Provide a callback to the pipeline that emits the Qt signal
+            def on_result(result):
+                signals.result_ready.emit(result)
+
+            pipeline.set_result_callback(on_result)
+
+            # new event loop for this thread because pipeline uses asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(pipeline.start(device_id))
+            finally:
+                loop.close()
+        except Exception as e:
+            logger.error(f"Pipeline thread error: {e}")
+            window.set_status(f"❌ Error: {e}")
+
+    pipeline_thread = threading.Thread(target=run_pipeline, daemon=True)
+    pipeline_thread.start()
 
     # Start Qt Event Loop
     exit_code = app.exec()
 
-    # Cleanup
-    pipeline.stop()
-    pipeline_thread.join(timeout=2.0)
+    # Cleanup — pipeline thread is daemon, will be killed on exit
     sys.exit(exit_code)

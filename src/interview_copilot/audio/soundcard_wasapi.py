@@ -87,12 +87,11 @@ class SoundCardWASAPIBackend(AudioCaptureBackend):
 
         # blocks until chunk_frames are available
         data = self._recorder.record(numframes=self._chunk_frames)
-        # data is (frames, channels) float32
-        data_bytes = data.astype(np.float32).tobytes()
+        # data is (frames, channels) float32 — pass as ndarray directly
 
         return AudioChunk(
             id=uuid.uuid4(),
-            data=data_bytes,
+            data=data.astype(np.float32),
             sample_rate=self._native_rate,
             channels=2,
             captured_at=time.time(),
