@@ -28,5 +28,5 @@ logger = setup_logging()
 
 def log_sensitive(msg: str, *args, **kwargs):
     """Log sensitive data only if privacy mode is disabled and text logging is enabled."""
-    if not config.PRIVACY_MODE and config.TEXT_LOGGING_ENABLED:
+    if not config.LOG_OBFUSCATION_ENABLED and config.TEXT_LOGGING_ENABLED:
         logger.info(msg, *args, **kwargs)

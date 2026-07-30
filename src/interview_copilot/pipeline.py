@@ -53,9 +53,6 @@ class InterviewPipeline:
         # History (bounded)
         self.transcript_history: list[Transcript] = []
 
-        # Track active suggestion task for cancellation
-        self._current_suggestion_task: asyncio.Task | None = None
-
     def set_result_callback(self, callback):
         self._result_callback = callback
 
@@ -196,6 +193,9 @@ class InterviewPipeline:
         logger.info("Async orchestrator started.")
         active_profile = self.profile_mgr.load_active_profile()
 
+        # Track active tasks so they don't get garbage collected
+        self._background_tasks = set()
+
         while not self._stop_event.is_set():
             try:
                 # Use get_nowait to avoid blocking the event loop
@@ -210,22 +210,16 @@ class InterviewPipeline:
             if len(self.transcript_history) > _MAX_HISTORY:
                 self.transcript_history = self.transcript_history[-_MAX_HISTORY:]
 
-            # Cancel stale suggestion task if still running
-            if self._current_suggestion_task and not self._current_suggestion_task.done():
-                self._current_suggestion_task.cancel()
-                try:
-                    await self._current_suggestion_task
-                except (asyncio.CancelledError, Exception):
-                    pass
-
-            # Launch processing as a task (non-blocking)
-            self._current_suggestion_task = asyncio.create_task(
+            # Launch processing as a task (non-blocking) and do not cancel previous ones
+            task = asyncio.create_task(
                 self._process_transcript(transcript, active_profile)
             )
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
-        # Cleanup: cancel any remaining task
-        if self._current_suggestion_task and not self._current_suggestion_task.done():
-            self._current_suggestion_task.cancel()
+        # Cleanup: cancel any remaining tasks on shutdown
+        for task in self._background_tasks:
+            task.cancel()
 
         logger.info("Async orchestrator stopped.")
 
