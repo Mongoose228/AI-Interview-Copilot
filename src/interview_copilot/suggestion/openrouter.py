@@ -72,13 +72,23 @@ class OpenRouterSuggester:
             return None
 
         recent_transcripts = transcript_history[-5:]  # Last 5 phrases
-        context = " ".join([t.text_en for t in recent_transcripts if t.text_en])
+        
+        context_lines = []
+        for i, t in enumerate(recent_transcripts):
+            if not t.text_en:
+                continue
+            if i == len(recent_transcripts) - 1:
+                context_lines.append(f'Current question: "{t.text_en}"')
+            else:
+                context_lines.append(f'- Interviewer: "{t.text_en}"')
+        
+        context = "\n".join(context_lines)
 
         if not context.strip():
             return None
 
         system_prompt = self._build_system_prompt(profile)
-        user_prompt = f'Interviewer says: "{context}"\nSuggest a response.'
+        user_prompt = f'Context of conversation:\n{context}\n\nSuggest a response.'
 
         try:
             response = await self._client.chat.completions.create(
@@ -94,7 +104,7 @@ class OpenRouterSuggester:
                     "json_schema": {
                         "name": "suggestion_schema",
                         "schema": _build_strict_schema(),
-                        "strict": True,
+                        # Removed strict=True for better model compatibility
                     },
                 },
             )
@@ -122,4 +132,8 @@ class OpenRouterSuggester:
 
         except Exception as e:
             logger.error(f"OpenRouter Suggestion failed: {e}")
-            return None
+            return SuggestionResult(
+                answer_en="[Error fetching AI suggestion]",
+                answer_ru="[Ошибка получения подсказки]",
+                needs_verification=True
+            )

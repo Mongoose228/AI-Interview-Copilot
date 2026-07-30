@@ -37,7 +37,7 @@ class Settings(BaseSettings):
 
     # Application Settings
     CONTEXT_DIR: str = "./context"
-    PRIVACY_MODE: bool = True
+    LOG_OBFUSCATION_ENABLED: bool = True
     TEXT_LOGGING_ENABLED: bool = False
     LOG_LEVEL: str = "INFO"
 

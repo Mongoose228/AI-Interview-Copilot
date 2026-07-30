@@ -156,6 +156,10 @@ class CopilotMainWindow(QMainWindow):
         shortcut_esc = QShortcut(QKeySequence(Qt.Key_Escape), self)
         shortcut_esc.activated.connect(self.close)
 
+        # Install event filter on central widget and scroll area viewport to enable dragging anywhere
+        self.central_widget.installEventFilter(self)
+        self.scroll_area.viewport().installEventFilter(self)
+
     def show(self):
         super().show()
         self._apply_display_affinity()
@@ -186,19 +190,20 @@ class CopilotMainWindow(QMainWindow):
         """Update the status label in the header."""
         self.status_lbl.setText(text)
 
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self._drag_pos = event.globalPosition().toPoint()
-
-    def mouseMoveEvent(self, event):
-        if self._drag_pos is not None:
-            delta = event.globalPosition().toPoint() - self._drag_pos
-            self.move(self.pos() + delta)
-            self._drag_pos = event.globalPosition().toPoint()
-
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self._drag_pos = None
+    def eventFilter(self, obj, event):
+        if event.type() == event.Type.MouseButtonPress:
+            if event.button() == Qt.LeftButton:
+                self._drag_pos = event.globalPosition().toPoint()
+        elif event.type() == event.Type.MouseMove:
+            if self._drag_pos is not None:
+                delta = event.globalPosition().toPoint() - self._drag_pos
+                self.move(self.pos() + delta)
+                self._drag_pos = event.globalPosition().toPoint()
+                return True # Consume to prevent text selection while dragging
+        elif event.type() == event.Type.MouseButtonRelease:
+            if event.button() == Qt.LeftButton:
+                self._drag_pos = None
+        return super().eventFilter(obj, event)
 
     def add_result(self, result: PipelineResult):
         """Called via signal when a new result is ready."""

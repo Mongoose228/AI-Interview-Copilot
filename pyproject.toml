@@ -7,7 +7,7 @@ name = "interview-copilot"
 version = "0.1.0"
 description = "AI Interview Copilot"
 readme = "README.md"
-requires-python = ">=3.11, <3.12"
+requires-python = ">=3.11"
 dependencies = [
     "SoundCard==0.4.6",
     "numpy==2.4.6",
@@ -30,6 +30,10 @@ dev = [
     "pytest-asyncio==1.4.0",
     "pytest-mock==3.15.1",
     "ruff==0.16.0",
+]
+nllb = [
+    "transformers",
+    "torch",
 ]
 
 [tool.hatch.build.targets.wheel]

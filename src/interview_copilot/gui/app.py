@@ -52,6 +52,9 @@ def start_gui(device_id: str = None):
 
     # Connect signals
     signals.result_ready.connect(window.add_result)
+    signals.error_occurred.connect(
+        lambda msg: window.set_status(f"⚠️ {msg}")
+    )
 
     # Initialize and run pipeline in a background thread
     # This prevents "Not Responding" while Whisper downloads/warms up
@@ -66,8 +69,12 @@ def start_gui(device_id: str = None):
             # Provide a callback to the pipeline that emits the Qt signal
             def on_result(result):
                 signals.result_ready.emit(result)
+            
+            def on_error(msg):
+                signals.error_occurred.emit(msg)
 
             pipeline.set_result_callback(on_result)
+            pipeline.set_error_callback(on_error)
 
             # new event loop for this thread because pipeline uses asyncio
             loop = asyncio.new_event_loop()
@@ -88,3 +95,7 @@ def start_gui(device_id: str = None):
 
     # Cleanup — pipeline thread is daemon, will be killed on exit
     sys.exit(exit_code)
+
+
+if __name__ == "__main__":
+    start_gui()

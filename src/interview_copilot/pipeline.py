@@ -23,6 +23,8 @@ _AUDIO_RETRY_BASE_DELAY = 1.0  # seconds
 
 class InterviewPipeline:
     def __init__(self):
+        if config.AUDIO_BACKEND != "soundcard":
+            raise NotImplementedError(f"Audio backend '{config.AUDIO_BACKEND}' is not implemented. Use 'soundcard'.")
         self.audio = SoundCardWASAPIBackend()
         self.vad = SileroVAD()
         self.stt = WhisperEngine()
@@ -46,6 +48,7 @@ class InterviewPipeline:
         # Callbacks
         self._result_callback = None
         self._audio_status_callback = None
+        self._error_callback = None
 
         # History (bounded)
         self.transcript_history: list[Transcript] = []
@@ -59,6 +62,9 @@ class InterviewPipeline:
     def set_audio_status_callback(self, callback):
         """Callback for audio device status changes: callback(is_connected: bool, message: str)"""
         self._audio_status_callback = callback
+
+    def set_error_callback(self, callback):
+        self._error_callback = callback
 
     def _capture_and_vad_worker(self, device_id: str = None):
         logger.info("Audio capture thread started.")
@@ -83,6 +89,8 @@ class InterviewPipeline:
                             logger.warning("Phrase queue is full, dropping phrase.")
 
             except Exception as e:
+                if self._stop_event.is_set():
+                    break
                 logger.error(f"Capture worker error: {e}")
                 try:
                     self.audio.stop()
@@ -132,6 +140,8 @@ class InterviewPipeline:
                 continue
             except Exception as e:
                 logger.error(f"STT worker error: {e}")
+                if self._error_callback:
+                    self._error_callback(f"Transcription error: {e}")
         logger.info("STT thread stopped.")
 
     async def _process_transcript(self, transcript: Transcript, active_profile):
@@ -154,14 +164,19 @@ class InterviewPipeline:
         translation_ru = None
         suggestion = None
 
-        if translation_coro and suggestion_coro:
-            translation_ru, suggestion = await asyncio.gather(
-                translation_coro, suggestion_coro
-            )
-        elif translation_coro:
-            translation_ru = await translation_coro
-        elif suggestion_coro:
-            suggestion = await suggestion_coro
+        try:
+            if translation_coro and suggestion_coro:
+                translation_ru, suggestion = await asyncio.gather(
+                    translation_coro, suggestion_coro
+                )
+            elif translation_coro:
+                translation_ru = await translation_coro
+            elif suggestion_coro:
+                suggestion = await suggestion_coro
+        except Exception as e:
+            logger.error(f"Processing error: {e}")
+            if self._error_callback:
+                self._error_callback(f"Processing error: {e}")
 
         # Create final result
         result = PipelineResult(
@@ -215,7 +230,7 @@ class InterviewPipeline:
         logger.info("Async orchestrator stopped.")
 
     def _display_result(self, result: PipelineResult):
-        if config.PRIVACY_MODE:
+        if config.LOG_OBFUSCATION_ENABLED:
             # In privacy mode, only log metadata
             logger.info(
                 f"[Result] id={result.id} "
@@ -260,6 +275,23 @@ class InterviewPipeline:
 
     def stop(self):
         self._stop_event.set()
+        
+        # Stop audio backend BEFORE joining threads to unblock read_chunk
+        try:
+            self.audio.stop()
+        except Exception:
+            pass
+            
+        # Flush last phrase if we were speaking
+        last_phrase = self.vad.flush()
+        if last_phrase:
+            try:
+                self.phrase_queue.put(last_phrase, timeout=1.0)
+            except queue.Full:
+                pass
+                
         self.vad.reset()  # Reset VAD state on stop
+        
         for t in self._threads:
+            # Short timeout, they should unblock now that audio is stopped
             t.join(timeout=2.0)

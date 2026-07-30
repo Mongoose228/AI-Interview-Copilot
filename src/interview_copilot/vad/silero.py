@@ -143,3 +143,29 @@ class SileroVAD:
                 logger.error(f"VAD Error: {e}")
 
         return phrases
+
+    def flush(self) -> SpeechPhrase | None:
+        """Flush the current phrase buffer, returning the phrase if one was being recorded."""
+        if not self._vad_lib_available:
+            return None
+
+        if self._phrase_buffer and self._phrase_duration_ms > config.VAD_MIN_SPEECH_MS:
+            import time
+            full_phrase_audio = np.concatenate(self._phrase_buffer)
+            duration_s = len(full_phrase_audio) / self._sample_rate
+            phrase = SpeechPhrase(
+                id=uuid.uuid4(),
+                audio_data=full_phrase_audio,
+                duration_s=duration_s,
+                captured_at=self._current_phrase_start_time,
+                vad_end_at=time.time(),
+            )
+            self._phrase_buffer = []
+            self._phrase_duration_ms = 0
+            self._is_speaking = False
+            return phrase
+        
+        self._phrase_buffer = []
+        self._phrase_duration_ms = 0
+        self._is_speaking = False
+        return None
