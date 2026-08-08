@@ -15,7 +15,7 @@ jobs:
     - name: Install system dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y xvfb libasound2-dev libpulse-dev
+        sudo apt-get install -y xvfb libasound2-dev libpulse-dev libegl1 libxcb-cursor0 libxkbcommon-x11-0 libgl1
         
     - name: Set up Python 3.11
       uses: actions/setup-python@v5
