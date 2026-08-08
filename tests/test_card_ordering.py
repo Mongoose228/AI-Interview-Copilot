@@ -1,6 +1,8 @@
-import uuid
 import sys
+import uuid
+
 from PySide6.QtWidgets import QApplication
+
 from interview_copilot.gui.main_window import CopilotMainWindow
 from interview_copilot.models import PipelineResult, SuggestionResult
 

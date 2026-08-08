@@ -198,7 +198,7 @@ class CopilotMainWindow(QMainWindow):
                     "Failed to set window display affinity. "
                     "Window may be visible in screen capture."
                 )
-        except Exception as e:
+        except (RuntimeError, ValueError, TypeError, OSError) as e:
             from ..logging_config import logger
             logger.warning(f"SetWindowDisplayAffinity not available: {e}")
 
@@ -216,8 +216,7 @@ class CopilotMainWindow(QMainWindow):
                 self.move(self.pos() + delta)
                 self._drag_pos = event.globalPosition().toPoint()
                 return True # Consume to prevent text selection while dragging
-        elif event.type() == event.Type.MouseButtonRelease:
-            if event.button() == Qt.LeftButton:
+        elif event.type() == event.Type.MouseButtonRelease and event.button() == Qt.LeftButton:
                 self._drag_pos = None
         return super().eventFilter(obj, event)
 

@@ -63,7 +63,7 @@ class WhisperEngine:
                 # Consume generator
                 list(segments)
                 logger.info("Whisper model warmed up.")
-            except Exception as e:
+            except (RuntimeError, ValueError, TypeError, OSError) as e:
                 logger.error(f"Failed to warm up Whisper: {e}")
 
     def transcribe(self, phrase: SpeechPhrase) -> Transcript:
@@ -122,7 +122,7 @@ class WhisperEngine:
                     confidence=confidence,
                     stt_duration_s=stt_duration,
                 )
-            except Exception as e:
+            except (RuntimeError, ValueError, TypeError, OSError) as e:
                 logger.error(f"Whisper transcription failed: {e}")
                 stt_duration = time.time() - start_time
                 return Transcript(

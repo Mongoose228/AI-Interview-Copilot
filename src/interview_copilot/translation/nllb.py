@@ -25,7 +25,7 @@ class NLLBTranslator(Translator):
             logger.info("NLLB Translator initialized successfully.")
         except ImportError:
             logger.error("transformers or torch not installed. Cannot use NLLB.")
-        except Exception as e:
+        except (RuntimeError, ValueError, TypeError, OSError) as e:
             logger.error(f"Failed to initialize NLLB: {e}")
 
     def translate(self, text: str, source_lang: str = "EN", target_lang: str = "RU") -> str | None:
@@ -52,6 +52,6 @@ class NLLBTranslator(Translator):
 
             result = self._tokenizer.batch_decode(translated_tokens, skip_special_tokens=True)[0]
             return result
-        except Exception as e:
+        except (RuntimeError, ValueError, TypeError, OSError) as e:
             logger.error(f"NLLB translation error: {e}")
             return None

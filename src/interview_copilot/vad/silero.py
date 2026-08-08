@@ -1,4 +1,3 @@
-import os
 import urllib.request
 import uuid
 from collections import deque
@@ -55,7 +54,7 @@ class SileroVAD:
             
             self._reset_onnx_state()
             self._vad_lib_available = True
-        except Exception as e:
+        except (RuntimeError, ValueError, TypeError, OSError) as e:
             logger.error(f"Failed to initialize ONNX VAD: {e}")
 
         self._sample_rate = 16000
@@ -204,7 +203,7 @@ class SileroVAD:
                     self._silence_duration_ms = 0
                     self._current_phrase_start_time = chunk.captured_at
 
-            except Exception as e:
+            except (RuntimeError, ValueError, TypeError, OSError) as e:
                 logger.error(f"VAD Error: {e}")
 
         return phrases

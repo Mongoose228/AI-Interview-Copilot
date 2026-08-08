@@ -16,7 +16,7 @@ class DeepLTranslator(Translator):
             try:
                 self._translator = deepl.Translator(self._api_key)
                 logger.info("DeepL Translator initialized successfully.")
-            except Exception as e:
+            except (RuntimeError, ValueError, TypeError, OSError) as e:
                 logger.error(f"Failed to initialize DeepL: {e}")
                 self._translator = None
 
@@ -33,6 +33,6 @@ class DeepLTranslator(Translator):
         except deepl.exceptions.DeepLException as e:
             logger.error(f"DeepL translation error: {e}")
             return None
-        except Exception as e:
+        except (RuntimeError, ValueError, TypeError, OSError) as e:
             logger.error(f"Unexpected translation error: {e}")
             return None

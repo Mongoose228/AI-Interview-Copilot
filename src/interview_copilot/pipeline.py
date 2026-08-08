@@ -64,7 +64,7 @@ class InterviewPipeline:
         self._error_callback = error_callback
         self._audio_status_callback = audio_status_callback
 
-    def _capture_and_vad_worker(self, device_id: str = None):
+    def _capture_and_vad_worker(self, device_id: str | None = None):
         logger.info("Audio capture thread started.")
         retries = 0
 
@@ -86,14 +86,14 @@ class InterviewPipeline:
                         except queue.Full:
                             logger.warning("Phrase queue is full, dropping phrase.")
 
-            except Exception as e:
+            except (RuntimeError, ValueError, TypeError, OSError) as e:
                 if self._stop_event.is_set():
                     break
                 logger.error(f"Capture worker error: {e}")
                 try:
                     self.audio.stop()
-                except Exception:
-                    pass
+                except (RuntimeError, ValueError, TypeError) as e:
+                    logger.warning(f"Error ignored: {e}")
 
                 retries += 1
                 if retries > _MAX_AUDIO_RETRIES:
@@ -118,8 +118,8 @@ class InterviewPipeline:
             finally:
                 try:
                     self.audio.stop()
-                except Exception:
-                    pass
+                except (RuntimeError, ValueError, TypeError) as e:
+                    logger.warning(f"Error ignored: {e}")
 
         logger.info("Audio capture thread stopped.")
 
@@ -129,12 +129,11 @@ class InterviewPipeline:
             try:
                 phrase = self.phrase_queue.get(timeout=0.5)
                 transcript = self.stt.transcribe(phrase)
-                if transcript.text_en:
-                    if self._loop and self.transcript_queue:
-                        self._loop.call_soon_threadsafe(self.transcript_queue.put_nowait, transcript)
+                if transcript.text_en and self._loop and self.transcript_queue:
+                    self._loop.call_soon_threadsafe(self.transcript_queue.put_nowait, transcript)
             except queue.Empty:
                 continue
-            except Exception as e:
+            except (RuntimeError, ValueError, TypeError, OSError) as e:
                 logger.error(f"STT worker error: {e}")
                 if self._error_callback:
                     self._error_callback(f"Transcription error: {e}")
@@ -189,7 +188,7 @@ class InterviewPipeline:
         except asyncio.CancelledError:
             logger.info(f"Task for transcript '{transcript.text_en}' was cancelled.")
             raise
-        except Exception as e:
+        except (RuntimeError, ValueError, TypeError, OSError) as e:
             logger.error(f"Processing error: {e}")
             if self._error_callback:
                 self._error_callback(f"Processing error: {e}")
@@ -220,7 +219,7 @@ class InterviewPipeline:
         while not self._stop_event.is_set():
             try:
                 transcript = await asyncio.wait_for(self.transcript_queue.get(), timeout=1.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
             # Emit early transcript to GUI
@@ -286,7 +285,7 @@ class InterviewPipeline:
                 print(f"💡 [AI RU]: {result.suggestion.answer_ru}")
             print("=" * 60 + "\n")
 
-    async def start(self, device_id: str = None):
+    async def start(self, device_id: str | None = None):
         self._stop_event.clear()
         self._loop = asyncio.get_running_loop()
         self.transcript_queue = asyncio.Queue()

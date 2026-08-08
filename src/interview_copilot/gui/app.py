@@ -10,7 +10,7 @@ from .main_window import CopilotMainWindow
 from .signals import PipelineSignals
 
 
-def start_gui(device_id: str = None):
+def start_gui(device_id: str | None = None):
     """Entry point for the GUI app."""
     app = QApplication(sys.argv)
 
@@ -106,7 +106,7 @@ def start_gui(device_id: str = None):
                 loop.run_until_complete(pipeline.start(device_id))
             finally:
                 loop.close()
-        except Exception as e:
+        except (RuntimeError, ValueError, TypeError, OSError) as e:
             logger.error(f"Pipeline thread error: {e}")
             signals.status_changed.emit(f"❌ Error: {e}")
 

@@ -19,7 +19,7 @@ def cmd_devices(args):
             default_marker = " (DEFAULT)" if d.get("is_default") else ""
             print(f"  [{idx}] {d['name']} {default_marker}")
             print(f"      ID: {d['id']}")
-    except Exception as e:
+    except (RuntimeError, ValueError, TypeError, OSError) as e:
         print(f"Error listing devices: {e}")
         sys.exit(1)
 
@@ -49,7 +49,7 @@ def cmd_capture_test(args):
                 print("\rNo data received.", end="", flush=True)
     except KeyboardInterrupt:
         print("\nStopping capture test...")
-    except Exception as e:
+    except (RuntimeError, ValueError, TypeError, OSError) as e:
         print(f"\nError during capture: {e}")
         sys.exit(1)
     finally:
@@ -83,7 +83,7 @@ def cmd_vad_test(args):
                 )
     except KeyboardInterrupt:
         print("\nStopping VAD test...")
-    except Exception as e:
+    except (RuntimeError, ValueError, TypeError, OSError) as e:
         print(f"\nError during VAD test: {e}")
         sys.exit(1)
     finally:
@@ -118,7 +118,7 @@ def cmd_transcribe_test(args):
 
     except KeyboardInterrupt:
         print("\nStopping STT test...")
-    except Exception as e:
+    except (RuntimeError, ValueError, TypeError, OSError) as e:
         print(f"\nError during STT test: {e}")
         sys.exit(1)
     finally:
@@ -138,7 +138,7 @@ def cmd_run(args):
     except KeyboardInterrupt:
         print("\nStopping pipeline...")
         pipeline.stop()
-    except Exception as e:
+    except (RuntimeError, ValueError, TypeError, OSError) as e:
         print(f"\nPipeline error: {e}")
         sys.exit(1)
 
@@ -150,7 +150,7 @@ def cmd_start(args):
 
         device_id = args.device if args.device else None
         start_gui(device_id)
-    except Exception as e:
+    except (RuntimeError, ValueError, TypeError, OSError) as e:
         print(f"\nGUI error: {e}")
         sys.exit(1)
 

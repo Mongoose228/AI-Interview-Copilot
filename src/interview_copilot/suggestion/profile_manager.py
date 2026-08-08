@@ -59,7 +59,7 @@ class ProfileManager:
             # Save to state file
             self._save_state(name)
             return snapshot
-        except Exception as e:
+        except (RuntimeError, ValueError, TypeError, OSError) as e:
             logger.error(f"Failed to load profile {name}: {e}")
             return None
 
@@ -68,7 +68,7 @@ class ProfileManager:
         try:
             with open(self._state_file, "w", encoding="utf-8") as f:
                 json.dump({"active_profile": name}, f)
-        except Exception as e:
+        except (RuntimeError, ValueError, TypeError, OSError) as e:
             logger.error(f"Failed to save state: {e}")
 
     def load_active_profile(self) -> ProfileSnapshot | None:
@@ -79,8 +79,8 @@ class ProfileManager:
                 with open(self._state_file, "r", encoding="utf-8") as f:
                     state = json.load(f)
                     active_name = state.get("active_profile")
-            except Exception:
-                pass
+            except (RuntimeError, ValueError, TypeError) as e:
+                logger.warning(f"Error ignored: {e}")
 
         if active_name:
             snapshot = self.load_profile(active_name)

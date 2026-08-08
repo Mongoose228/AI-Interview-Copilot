@@ -1,7 +1,6 @@
 import time
 import uuid
 import warnings
-from typing import Optional
 
 import numpy as np
 import soundcard as sc

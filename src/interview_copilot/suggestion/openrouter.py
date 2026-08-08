@@ -1,5 +1,5 @@
-import re
-from typing import Callable, Awaitable
+from collections.abc import Awaitable, Callable
+
 import httpx
 from openai import AsyncOpenAI
 
@@ -130,7 +130,7 @@ class OpenRouterSuggester:
                 needs_verification=needs_verify
             )
 
-        except Exception as e:
+        except (RuntimeError, ValueError, TypeError, OSError) as e:
             logger.error(f"OpenRouter Suggestion failed: {e}")
             return None
 

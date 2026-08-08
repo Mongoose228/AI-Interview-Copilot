@@ -1,9 +1,10 @@
 import uuid
 from unittest.mock import MagicMock
+
 import numpy as np
 
-from interview_copilot.vad.silero import SileroVAD
 from interview_copilot.models import AudioChunk
+from interview_copilot.vad.silero import SileroVAD
 
 
 def test_vad_detection():
