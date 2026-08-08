@@ -6,14 +6,14 @@
 
 - **GUI**: PySide6 (Qt)
 - **STT (Speech-to-Text)**: Faster-Whisper
-- **Audio Capture**: WASAPI Loopback (PyAudioPatch / SoundCard)
+- **Audio Capture**: WASAPI Loopback (SoundCard)
 - **VAD**: Silero VAD
 - **Translation**: DeepL API / NLLB (HuggingFace)
 - **Suggestions**: OpenRouter API (Claude, GPT, etc.)
 
 ## Запуск
 
-1. Установите зависимости (требуется Python 3.10+):
+1. Установите зависимости (требуется Python 3.11+):
    ```bash
    pip install -e .
    ```

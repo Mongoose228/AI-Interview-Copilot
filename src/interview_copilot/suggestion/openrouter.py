@@ -1,27 +1,24 @@
-import json
-
+import re
+from typing import Callable, Awaitable
 import httpx
 from openai import AsyncOpenAI
-from pydantic import BaseModel, Field
 
 from ..config import config
 from ..logging_config import logger
 from ..models import ProfileSnapshot, SuggestionResult, Transcript
 
+_HEDGING_TERMS = {
+    "i'm not sure", "i am not sure", "i think", "might be", "could be", 
+    "maybe", "perhaps", "verify", "double check", "double-check", 
+    "not 100%", "not entirely sure", "it's possible"
+}
 
-class OpenRouterResponseFormat(BaseModel):
-    answer_en: str = Field(description="Suggested answer in English")
-    answer_ru: str = Field(description="Translation of the suggested answer in Russian")
-    needs_verification: bool = Field(
-        description="True if the AI is not confident and user should double check"
-    )
-
-
-def _build_strict_schema() -> dict:
-    """Build JSON schema with additionalProperties: false for strict mode."""
-    schema = OpenRouterResponseFormat.model_json_schema()
-    schema["additionalProperties"] = False
-    return schema
+def _detect_needs_verification(text: str) -> bool:
+    lower_text = text.lower()
+    for term in _HEDGING_TERMS:
+        if term in lower_text:
+            return True
+    return False
 
 
 class OpenRouterSuggester:
@@ -56,18 +53,21 @@ class OpenRouterSuggester:
             "Below is the candidate's profile. Use this to provide relevant and personalized answers.\n\n"
             f"--- CANDIDATE PROFILE ---\n{profile.content}\n-------------------------\n\n"
             "Your task is to provide a brief, professional, and accurate response to the interviewer's question.\n"
-            "Output your answer ONLY in the requested JSON format. Keep the answer concise (2-3 sentences max)."
+            "Output your answer as plain text in English. Keep the answer concise (2-3 sentences max).\n"
+            "Do NOT use markdown formatting, markdown blocks, or JSON."
         )
         return prompt
 
     async def get_suggestion(
-        self, transcript_history: list[Transcript], profile: ProfileSnapshot
+        self, 
+        transcript_history: list[Transcript], 
+        profile: ProfileSnapshot,
+        stream_callback: Callable[[str], Awaitable[None]] | None = None
     ) -> SuggestionResult | None:
         if not self._client:
             return None
 
         # Build context from the last N transcripts
-        # If there is no history, or the latest is empty, skip
         if not transcript_history:
             return None
 
@@ -91,49 +91,46 @@ class OpenRouterSuggester:
         user_prompt = f'Context of conversation:\n{context}\n\nSuggest a response.'
 
         try:
-            response = await self._client.chat.completions.create(
+            response_stream = await self._client.chat.completions.create(
                 model=self._model,
                 messages=[
-                    {"role": "system", "content": system_prompt},
+                    {
+                        "role": "system", 
+                        "content": [
+                            {
+                                "type": "text", 
+                                "text": system_prompt, 
+                                "cache_control": {"type": "ephemeral"}
+                            }
+                        ]
+                    },
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=0.2,
                 max_tokens=1000,
-                response_format={
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "suggestion_schema",
-                        "schema": _build_strict_schema(),
-                        # Removed strict=True for better model compatibility
-                    },
-                },
+                stream=True,
             )
 
-            result_text = response.choices[0].message.content
-            if result_text:
-                # Some models might wrap JSON in markdown block even with response_format
-                result_text = result_text.strip()
-                if result_text.startswith("```json"):
-                    result_text = result_text[7:]
-                if result_text.startswith("```"):
-                    result_text = result_text[3:]
-                if result_text.endswith("```"):
-                    result_text = result_text[:-3]
-                result_text = result_text.strip()
+            full_text = ""
+            async for chunk in response_stream:
+                if chunk.choices and chunk.choices[0].delta.content is not None:
+                    token = chunk.choices[0].delta.content
+                    full_text += token
+                    if stream_callback:
+                        await stream_callback(token)
 
-                data = json.loads(result_text)
-                return SuggestionResult(
-                    answer_en=data.get("answer_en", ""),
-                    answer_ru=data.get("answer_ru", ""),
-                    needs_verification=data.get("needs_verification", False),
-                )
+            full_text = full_text.strip()
+            if not full_text:
+                return None
 
-            return None
+            needs_verify = _detect_needs_verification(full_text)
+
+            return SuggestionResult(
+                answer_en=full_text,
+                needs_verification=needs_verify
+            )
 
         except Exception as e:
             logger.error(f"OpenRouter Suggestion failed: {e}")
-            return SuggestionResult(
-                answer_en="[Error fetching AI suggestion]",
-                answer_ru="[Ошибка получения подсказки]",
-                needs_verification=True
-            )
+            return None
+

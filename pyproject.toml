@@ -12,8 +12,6 @@ dependencies = [
     "SoundCard==0.4.6",
     "numpy==2.4.6",
     "cffi",
-    "soxr==1.1.0",
-    "silero-vad==6.2.1",
     "onnxruntime==1.28.0",
     "faster-whisper==1.2.1",
     "ctranslate2==4.8.1",

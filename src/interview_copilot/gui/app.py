@@ -17,10 +17,10 @@ def start_gui(device_id: str = None):
     # Global stylesheet for the app
     app.setStyleSheet("""
         QWidget {
-            background-color: #1E1E1E;
             color: #E0E0E0;
             font-family: 'Segoe UI', Inter, sans-serif;
             font-size: 14px;
+            background: transparent;
         }
         QScrollArea {
             border: none;
@@ -51,30 +51,53 @@ def start_gui(device_id: str = None):
     window.show()
 
     # Connect signals
-    signals.result_ready.connect(window.add_result)
+    signals.transcript_ready.connect(window.add_transcript)
+    signals.suggestion_ready.connect(window.update_suggestion)
+    signals.suggestion_token.connect(window.append_token)
     signals.error_occurred.connect(
         lambda msg: window.set_status(f"⚠️ {msg}")
+    )
+    signals.status_changed.connect(window.set_status)
+    signals.audio_status_changed.connect(
+        lambda is_connected, msg: window.set_status(msg if not is_connected else "")
     )
 
     # Initialize and run pipeline in a background thread
     # This prevents "Not Responding" while Whisper downloads/warms up
+    pipeline_ref = []
+
     def run_pipeline():
         try:
             # Heavy initialization happens here, in the background thread
             pipeline = InterviewPipeline()
+            pipeline_ref.append(pipeline)
 
             # Signal that loading is complete
-            window.set_status("")
+            signals.status_changed.emit("")
 
             # Provide a callback to the pipeline that emits the Qt signal
-            def on_result(result):
-                signals.result_ready.emit(result)
+            def on_transcript(result):
+                signals.transcript_ready.emit(result)
+
+            def on_suggestion(result):
+                signals.suggestion_ready.emit(result)
+
+            def on_token(phrase_id, token):
+                signals.suggestion_token.emit(phrase_id, token)
             
             def on_error(msg):
                 signals.error_occurred.emit(msg)
 
-            pipeline.set_result_callback(on_result)
-            pipeline.set_error_callback(on_error)
+            def on_audio_status(is_connected, msg):
+                signals.audio_status_changed.emit(is_connected, msg)
+
+            pipeline.set_callbacks(
+                transcript_callback=on_transcript,
+                suggestion_callback=on_suggestion,
+                token_callback=on_token,
+                error_callback=on_error,
+                audio_status_callback=on_audio_status
+            )
 
             # new event loop for this thread because pipeline uses asyncio
             loop = asyncio.new_event_loop()
@@ -85,17 +108,27 @@ def start_gui(device_id: str = None):
                 loop.close()
         except Exception as e:
             logger.error(f"Pipeline thread error: {e}")
-            window.set_status(f"❌ Error: {e}")
+            signals.status_changed.emit(f"❌ Error: {e}")
 
-    pipeline_thread = threading.Thread(target=run_pipeline, daemon=True)
+    # Set up instantaneous shutdown
+    def on_quit():
+        # Force the OS to instantly kill the process and all blocked background threads.
+        import os
+        os._exit(0)
+
+    app.aboutToQuit.connect(on_quit)
+
+    pipeline_thread = threading.Thread(target=run_pipeline, daemon=False)
     pipeline_thread.start()
 
     # Start Qt Event Loop
     exit_code = app.exec()
 
-    # Cleanup — pipeline thread is daemon, will be killed on exit
-    sys.exit(exit_code)
+    # Wait for the pipeline thread to gracefully exit
+    pipeline_thread.join(timeout=3.0)
 
+    import os
+    os._exit(exit_code)
 
 if __name__ == "__main__":
     start_gui()

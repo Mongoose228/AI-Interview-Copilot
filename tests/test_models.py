@@ -32,7 +32,6 @@ def test_pipeline_result_creation():
         suggestion=None,
         profile=None,
         timings=[],
-        errors=[],
         created_at=1234.5,
     )
 

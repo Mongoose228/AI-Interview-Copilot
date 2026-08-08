@@ -6,7 +6,7 @@ import time
 from .audio.soundcard_wasapi import SoundCardWASAPIBackend
 from .config import config
 from .logging_config import log_sensitive, logger
-from .models import PipelineResult, Transcript
+from .models import PipelineResult, StageTiming, Transcript
 from .stt.whisper_engine import WhisperEngine
 from .suggestion.openrouter import OpenRouterSuggester
 from .suggestion.profile_manager import ProfileManager
@@ -40,28 +40,29 @@ class InterviewPipeline:
         self.profile_mgr = ProfileManager()
 
         self.phrase_queue = queue.Queue(maxsize=20)
-        self.transcript_queue = queue.Queue(maxsize=20)
+        self.phrase_queue = queue.Queue(maxsize=20)
+        self.transcript_queue = None
+        self._loop = None
 
         self._stop_event = threading.Event()
         self._threads = []
 
         # Callbacks
-        self._result_callback = None
+        self._transcript_callback = None
+        self._suggestion_callback = None
+        self._token_callback = None
         self._audio_status_callback = None
         self._error_callback = None
 
         # History (bounded)
         self.transcript_history: list[Transcript] = []
 
-    def set_result_callback(self, callback):
-        self._result_callback = callback
-
-    def set_audio_status_callback(self, callback):
-        """Callback for audio device status changes: callback(is_connected: bool, message: str)"""
-        self._audio_status_callback = callback
-
-    def set_error_callback(self, callback):
-        self._error_callback = callback
+    def set_callbacks(self, transcript_callback, suggestion_callback, token_callback, error_callback, audio_status_callback):
+        self._transcript_callback = transcript_callback
+        self._suggestion_callback = suggestion_callback
+        self._token_callback = token_callback
+        self._error_callback = error_callback
+        self._audio_status_callback = audio_status_callback
 
     def _capture_and_vad_worker(self, device_id: str = None):
         logger.info("Audio capture thread started.")
@@ -129,10 +130,8 @@ class InterviewPipeline:
                 phrase = self.phrase_queue.get(timeout=0.5)
                 transcript = self.stt.transcribe(phrase)
                 if transcript.text_en:
-                    try:
-                        self.transcript_queue.put(transcript, timeout=1.0)
-                    except queue.Full:
-                        logger.warning("Transcript queue is full, dropping transcript.")
+                    if self._loop and self.transcript_queue:
+                        self._loop.call_soon_threadsafe(self.transcript_queue.put_nowait, transcript)
             except queue.Empty:
                 continue
             except Exception as e:
@@ -141,23 +140,40 @@ class InterviewPipeline:
                     self._error_callback(f"Transcription error: {e}")
         logger.info("STT thread stopped.")
 
-    async def _process_transcript(self, transcript: Transcript, active_profile):
+    async def _process_transcript(self, transcript: Transcript, active_profile, history_snapshot: list[Transcript]):
         """Process a single transcript: translate + get suggestion concurrently."""
-        # Build tasks for concurrent execution
         translation_coro = None
         suggestion_coro = None
+        
+        # In our refactor, we just store duration_s to avoid modifying the whole pipeline right now
+        timings = [StageTiming(stage_name="STT", started_at=0.0, ended_at=transcript.stt_duration_s, duration_s=transcript.stt_duration_s)]
+
+        async def timed_translate():
+            start_t = time.time()
+            res = await asyncio.to_thread(self.translator.translate, transcript.text_en)
+            duration = time.time() - start_t
+            timings.append(StageTiming(stage_name="Translation", started_at=start_t, ended_at=time.time(), duration_s=duration))
+            return res
+
+        async def timed_suggestion():
+            start_t = time.time()
+            res = await self.suggester.get_suggestion(
+                history_snapshot, active_profile, stream_callback=stream_cb
+            )
+            duration = time.time() - start_t
+            timings.append(StageTiming(stage_name="AI_Suggestion", started_at=start_t, ended_at=time.time(), duration_s=duration))
+            return res
 
         if self.translator:
-            translation_coro = asyncio.to_thread(
-                self.translator.translate, transcript.text_en
-            )
+            translation_coro = timed_translate()
+
+        async def stream_cb(token: str):
+            if self._token_callback:
+                self._token_callback(transcript.phrase_id, token)
 
         if active_profile:
-            suggestion_coro = self.suggester.get_suggestion(
-                self.transcript_history, active_profile
-            )
+            suggestion_coro = timed_suggestion()
 
-        # Run translation and suggestion concurrently
         translation_ru = None
         suggestion = None
 
@@ -170,39 +186,54 @@ class InterviewPipeline:
                 translation_ru = await translation_coro
             elif suggestion_coro:
                 suggestion = await suggestion_coro
+        except asyncio.CancelledError:
+            logger.info(f"Task for transcript '{transcript.text_en}' was cancelled.")
+            raise
         except Exception as e:
             logger.error(f"Processing error: {e}")
             if self._error_callback:
                 self._error_callback(f"Processing error: {e}")
 
-        # Create final result
         result = PipelineResult(
             id=transcript.phrase_id,
             transcript=transcript.text_en,
             translation_ru=translation_ru,
             suggestion=suggestion,
             profile=active_profile,
+            timings=timings,
             created_at=time.time(),
         )
 
         self._display_result(result)
-        if self._result_callback:
-            self._result_callback(result)
+        if self._suggestion_callback:
+            self._suggestion_callback(result)
 
     async def _async_orchestrator(self):
         logger.info("Async orchestrator started.")
         active_profile = self.profile_mgr.load_active_profile()
 
-        # Track active tasks so they don't get garbage collected
         self._background_tasks = set()
+        current_llm_task = None
+
+        from .suggestion.phrase_filter import is_filler
 
         while not self._stop_event.is_set():
             try:
-                # Use get_nowait to avoid blocking the event loop
-                transcript = self.transcript_queue.get_nowait()
-            except queue.Empty:
-                await asyncio.sleep(0.1)
+                transcript = await asyncio.wait_for(self.transcript_queue.get(), timeout=1.0)
+            except asyncio.TimeoutError:
                 continue
+
+            # Emit early transcript to GUI
+            if self._transcript_callback:
+                initial_result = PipelineResult(
+                    id=transcript.phrase_id,
+                    transcript=transcript.text_en,
+                    translation_ru=None,
+                    suggestion=None,
+                    profile=active_profile,
+                    created_at=time.time()
+                )
+                self._transcript_callback(initial_result)
 
             self.transcript_history.append(transcript)
 
@@ -210,15 +241,24 @@ class InterviewPipeline:
             if len(self.transcript_history) > _MAX_HISTORY:
                 self.transcript_history = self.transcript_history[-_MAX_HISTORY:]
 
-            # Launch processing as a task (non-blocking) and do not cancel previous ones
-            task = asyncio.create_task(
-                self._process_transcript(transcript, active_profile)
+            # Cancel-and-resend logic
+            if is_filler(transcript.text_en):
+                logger.debug(f"Dropped filler from LLM processing: '{transcript.text_en}'")
+                continue
+
+            if current_llm_task and not current_llm_task.done():
+                current_llm_task.cancel()
+
+            history_snapshot = list(self.transcript_history[-5:])
+
+            current_llm_task = asyncio.create_task(
+                self._process_transcript(transcript, active_profile, history_snapshot)
             )
-            self._background_tasks.add(task)
-            task.add_done_callback(self._background_tasks.discard)
+            self._background_tasks.add(current_llm_task)
+            current_llm_task.add_done_callback(self._background_tasks.discard)
 
         # Cleanup: cancel any remaining tasks on shutdown
-        for task in self._background_tasks:
+        for task in list(self._background_tasks):
             task.cancel()
 
         logger.info("Async orchestrator stopped.")
@@ -248,6 +288,8 @@ class InterviewPipeline:
 
     async def start(self, device_id: str = None):
         self._stop_event.clear()
+        self._loop = asyncio.get_running_loop()
+        self.transcript_queue = asyncio.Queue()
 
         # Start Threads
         t_cap = threading.Thread(
@@ -270,13 +312,12 @@ class InterviewPipeline:
     def stop(self):
         self._stop_event.set()
         
-        # Stop audio backend BEFORE joining threads to unblock read_chunk
-        try:
-            self.audio.stop()
-        except Exception:
-            pass
+        # Audio backend will be stopped by the capture thread's finally block
+        # Wait for threads to exit
+        for t in self._threads:
+            t.join(timeout=2.0)
             
-        # Flush last phrase if we were speaking
+        # Threads are dead — now it is safe to touch VAD state
         last_phrase = self.vad.flush()
         if last_phrase:
             try:
@@ -285,7 +326,3 @@ class InterviewPipeline:
                 pass
                 
         self.vad.reset()  # Reset VAD state on stop
-        
-        for t in self._threads:
-            # Short timeout, they should unblock now that audio is stopped
-            t.join(timeout=2.0)

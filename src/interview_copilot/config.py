@@ -1,6 +1,9 @@
+from pathlib import Path
 from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 
 
 class Settings(BaseSettings):
@@ -36,12 +39,12 @@ class Settings(BaseSettings):
     NLLB_MODEL: str = "facebook/nllb-200-distilled-600M"
 
     # Application Settings
-    CONTEXT_DIR: str = "./context"
+    CONTEXT_DIR: str = str(_ROOT_DIR / "context")
     LOG_OBFUSCATION_ENABLED: bool = True
     TEXT_LOGGING_ENABLED: bool = False
     LOG_LEVEL: str = "INFO"
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(env_file=str(_ROOT_DIR / ".env"), env_file_encoding="utf-8")
 
 
 config = Settings()

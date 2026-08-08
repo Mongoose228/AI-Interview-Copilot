@@ -74,7 +74,7 @@ class WhisperEngine:
 
         with self._lock:
             try:
-                segments, info = self._model.transcribe(
+                segments_gen, info = self._model.transcribe(
                     phrase.audio_data,
                     beam_size=config.WHISPER_BEAM_SIZE,
                     language="en",
@@ -82,19 +82,44 @@ class WhisperEngine:
                     vad_filter=False,  # We already do VAD
                 )
 
-                # Consume generator completely inside the lock to get all text
-                texts = []
-                for segment in segments:
-                    texts.append(segment.text.strip())
+                # Consume generator completely inside the lock
+                segments = list(segments_gen)
+                stt_duration = time.time() - start_time
 
+                if not segments:
+                    return Transcript(phrase.id, "", "en", 0.0, stt_duration)
+
+                avg_logprob = sum(s.avg_logprob for s in segments) / len(segments)
+                max_no_speech = max(s.no_speech_prob for s in segments)
+
+                # 1. Filter by metrics
+                if avg_logprob < -1.0 or max_no_speech > 0.6:
+                    logger.debug(f"Dropped hallucination by metrics: logprob={avg_logprob:.2f}, no_speech={max_no_speech:.2f}")
+                    return Transcript(phrase.id, "", "en", 0.0, stt_duration)
+
+                texts = [s.text.strip() for s in segments]
                 full_text = " ".join(texts).strip()
 
-                stt_duration = time.time() - start_time
+                # 2. Filter by blacklist
+                text_lower = full_text.lower()
+                blacklist = {
+                    "thank you.", "thanks for watching!", "bye.", "you.", "...", 
+                    "okay.", "so.", "thank you", "thanks for watching", "bye", 
+                    "you", "okay", "so"
+                }
+                if text_lower in blacklist or not text_lower:
+                    logger.debug(f"Dropped hallucination by blacklist: '{full_text}'")
+                    return Transcript(phrase.id, "", "en", 0.0, stt_duration)
+
+                # Use exp(avg_logprob) as a more meaningful confidence metric than language_probability
+                import math
+                confidence = math.exp(avg_logprob)
+
                 return Transcript(
                     phrase_id=phrase.id,
                     text_en=full_text,
                     language=info.language,
-                    confidence=info.language_probability,
+                    confidence=confidence,
                     stt_duration_s=stt_duration,
                 )
             except Exception as e:

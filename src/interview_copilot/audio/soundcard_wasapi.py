@@ -1,8 +1,13 @@
 import time
 import uuid
+import warnings
+from typing import Optional
 
 import numpy as np
 import soundcard as sc
+
+# Suppress harmless WASAPI discontinuity warnings
+warnings.filterwarnings("ignore", message="data discontinuity in recording", module="soundcard")
 
 from ..config import config
 from ..models import AudioChunk
@@ -15,11 +20,9 @@ class SoundCardWASAPIBackend(AudioCaptureBackend):
         self._recorder = None
         self._running = False
         self._sample_rate = config.AUDIO_SAMPLE_RATE
-        # we will capture loopback, usually 48000Hz default on windows
-        # soundcard can capture at its native rate, but we can also just request 48000
-        # and then we resample later.
-        self._native_rate = 48000
-        self._chunk_frames = int(self._native_rate * (config.AUDIO_CHUNK_MS / 1000.0))
+        # Windows WASAPI shared mode supports automatic resampling.
+        # We request our target rate (16000Hz) directly.
+        self._chunk_frames = int(self._sample_rate * (config.AUDIO_CHUNK_MS / 1000.0))
 
     def list_devices(self) -> list[dict]:
         mics = sc.all_microphones(include_loopback=True)
@@ -75,11 +78,15 @@ class SoundCardWASAPIBackend(AudioCaptureBackend):
                 raise RuntimeError("No loopback device found.")
             self._mic = mics[default_info["index"]]
 
+        # soundcard requires samplerate to be passed explicitly (no default/dynamic native rate)
+        # WASAPI handles the resampling if the requested rate doesn't match the native rate.
         self._recorder = self._mic.recorder(
-            samplerate=self._native_rate, channels=2, blocksize=self._chunk_frames
+            samplerate=self._sample_rate, channels=2, blocksize=self._chunk_frames
         )
         self._recorder.__enter__()
         self._running = True
+        
+        self._chunk_frames = int(self._sample_rate * (config.AUDIO_CHUNK_MS / 1000.0))
 
     def read_chunk(self) -> AudioChunk:
         if not self._running or not self._recorder:
@@ -92,7 +99,7 @@ class SoundCardWASAPIBackend(AudioCaptureBackend):
         return AudioChunk(
             id=uuid.uuid4(),
             data=data.astype(np.float32),
-            sample_rate=self._native_rate,
+            sample_rate=self._sample_rate,
             channels=2,
             captured_at=time.time(),
         )

@@ -28,6 +28,7 @@ class ResultWidget(QFrame):
 
     def __init__(self, result: PipelineResult, parent=None):
         super().__init__(parent)
+        self.phrase_id = result.id
         self.setStyleSheet("""
             ResultWidget {
                 background-color: rgba(40, 40, 40, 0.4);
@@ -45,32 +46,45 @@ class ResultWidget(QFrame):
         layout.setSpacing(6)
 
         # Original EN Text
-        lbl_en = QLabel(f"🗣️ <b>EN:</b> {result.transcript}")
+        lbl_en = QLabel(f"🎙️ <b>EN:</b> {result.transcript}")
         lbl_en.setWordWrap(True)
         lbl_en.setStyleSheet("color: #CCCCCC; font-size: 13px;")
         layout.addWidget(lbl_en)
 
-        # Translation RU Text
-        if result.translation_ru:
-            lbl_ru = QLabel(f"🇷🇺 <b>RU:</b> {result.translation_ru}")
-            lbl_ru.setWordWrap(True)
-            lbl_ru.setStyleSheet("color: #AAAAAA; font-size: 13px; font-style: italic;")
-            layout.addWidget(lbl_ru)
+        # AI Suggestion Placeholder
+        self.line = QFrame()
+        self.line.setFrameShape(QFrame.HLine)
+        self.line.setFrameShadow(QFrame.Sunken)
+        self.line.setStyleSheet("background-color: rgba(100, 100, 100, 0.5);")
+        layout.addWidget(self.line)
 
-        # AI Suggestion
-        if result.suggestion:
-            # Separator
-            line = QFrame()
-            line.setFrameShape(QFrame.HLine)
-            line.setFrameShadow(QFrame.Sunken)
-            line.setStyleSheet("background-color: rgba(100, 100, 100, 0.5);")
-            layout.addWidget(line)
+        self.lbl_ai = QLabel("🤔 <i>Thinking...</i>")
+        self.lbl_ai.setWordWrap(True)
+        self.lbl_ai.setStyleSheet("color: #888888; font-size: 13px; font-style: italic;")
+        layout.addWidget(self.lbl_ai)
+        
+        self.current_suggestion_text = ""
 
-            verify_icon = "⚠️" if result.suggestion.needs_verification else "✅"
-            lbl_ai = QLabel(f"💡 <b>AI {verify_icon}:</b> {result.suggestion.answer_ru}")
-            lbl_ai.setWordWrap(True)
-            lbl_ai.setStyleSheet("color: #4CAF50; font-size: 15px; font-weight: bold;")
-            layout.addWidget(lbl_ai)
+    def append_token(self, token: str):
+        if not self.current_suggestion_text:
+            self.lbl_ai.setStyleSheet("color: #4CAF50; font-size: 15px; font-weight: bold;")
+        self.current_suggestion_text += token
+        self.lbl_ai.setText(f"💡 <b>AI:</b> {self.current_suggestion_text}")
+
+    def update_suggestion(self, suggestion):
+        if not suggestion:
+            self.lbl_ai.setText("❌ <i>Suggestion failed or dropped.</i>")
+            self.lbl_ai.setStyleSheet("color: #F44336; font-size: 13px; font-style: italic; border: 1px solid rgba(244, 67, 54, 0.5); padding: 4px; border-radius: 4px;")
+            return
+            
+        text = suggestion.answer_en
+        hedges = ["i'm not sure", "i am not sure", "i think", "might be", "could be", "maybe", "perhaps"]
+        is_unsure = any(h in text.lower() for h in hedges)
+        icon = "⚠️" if is_unsure else "✅"
+        
+        self.current_suggestion_text = text
+        self.lbl_ai.setStyleSheet("color: #4CAF50; font-size: 15px; font-weight: bold;")
+        self.lbl_ai.setText(f"💡 <b>AI {icon}:</b> {text}")
 
 
 class CopilotMainWindow(QMainWindow):
@@ -128,7 +142,8 @@ class CopilotMainWindow(QMainWindow):
                 color: #FFFFFF;
             }
         """)
-        self.close_btn.clicked.connect(self.close)
+        from PySide6.QtWidgets import QApplication
+        self.close_btn.clicked.connect(QApplication.instance().quit)
         self.header_layout.addWidget(self.close_btn)
 
         self.main_layout.addLayout(self.header_layout)
@@ -149,16 +164,17 @@ class CopilotMainWindow(QMainWindow):
         # For dragging the frameless window
         self._drag_pos = None
 
-        # Track result widgets for ring buffer eviction
+        # Track result widgets for ring buffer eviction and ID mapping
         self._result_widgets: list[ResultWidget] = []
+        self._widget_map = {}
 
         # Keyboard shortcut: Escape to close
         shortcut_esc = QShortcut(QKeySequence(Qt.Key_Escape), self)
-        shortcut_esc.activated.connect(self.close)
+        shortcut_esc.activated.connect(QApplication.instance().quit)
 
-        # Install event filter on central widget and scroll area viewport to enable dragging anywhere
-        self.central_widget.installEventFilter(self)
-        self.scroll_area.viewport().installEventFilter(self)
+        # Install event filter on header widgets to enable dragging
+        self.title_lbl.installEventFilter(self)
+        self.status_lbl.installEventFilter(self)
 
     def show(self):
         super().show()
@@ -205,20 +221,34 @@ class CopilotMainWindow(QMainWindow):
                 self._drag_pos = None
         return super().eventFilter(obj, event)
 
-    def add_result(self, result: PipelineResult):
-        """Called via signal when a new result is ready."""
+    def add_transcript(self, result: PipelineResult):
+        """Called via signal when a new transcript is ready."""
         widget = ResultWidget(result)
         self.scroll_layout.addWidget(widget)
         self._result_widgets.append(widget)
+        self._widget_map[result.id] = widget
 
         # Ring buffer: evict oldest cards when exceeding limit
         while len(self._result_widgets) > _MAX_RESULT_CARDS:
             oldest = self._result_widgets.pop(0)
+            self._widget_map.pop(oldest.phrase_id, None)
             self.scroll_layout.removeWidget(oldest)
             oldest.deleteLater()
 
         # Auto-scroll to bottom
         QTimer.singleShot(50, self._scroll_to_bottom)
+
+    def update_suggestion(self, result: PipelineResult):
+        widget = self._widget_map.get(result.id)
+        if widget:
+            widget.update_suggestion(result.suggestion)
+            QTimer.singleShot(50, self._scroll_to_bottom)
+
+    def append_token(self, phrase_id, token: str):
+        widget = self._widget_map.get(phrase_id)
+        if widget:
+            widget.append_token(token)
+            QTimer.singleShot(10, self._scroll_to_bottom)
 
     def _scroll_to_bottom(self):
         scrollbar = self.scroll_area.verticalScrollBar()

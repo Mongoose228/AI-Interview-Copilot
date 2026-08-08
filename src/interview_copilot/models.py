@@ -34,8 +34,8 @@ class Transcript:
 @dataclass(frozen=True)
 class SuggestionResult:
     answer_en: str
-    answer_ru: str
-    needs_verification: bool
+    answer_ru: str | None = None
+    needs_verification: bool = False
 
 
 @dataclass(frozen=True)
@@ -46,12 +46,6 @@ class StageTiming:
     duration_s: float
 
 
-@dataclass(frozen=True)
-class StageError:
-    stage_name: str
-    error_type: str
-    message: str
-    recoverable: bool
 
 
 @dataclass(frozen=True)
@@ -71,5 +65,4 @@ class PipelineResult:
     suggestion: SuggestionResult | None
     profile: ProfileSnapshot | None
     timings: list[StageTiming] = field(default_factory=list)
-    errors: list[StageError] = field(default_factory=list)
     created_at: float = 0.0
