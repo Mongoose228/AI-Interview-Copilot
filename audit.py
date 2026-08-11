@@ -3,7 +3,7 @@ import sys
 print("Checking imports...")
 imports_ok = True
 modules_to_test = [
-    "soundcard", "numpy", "soxr", "onnxruntime", "faster_whisper", 
+    "soundcard", "numpy", "onnxruntime", "faster_whisper", 
     "deepl", "openai", "pydantic", "pydantic_settings", "PySide6", "ctranslate2"
 ]
 for mod in modules_to_test:
@@ -45,13 +45,4 @@ try:
 except Exception as e:
     print(f"[ERROR] CTranslate2 check failed: {e}")
 
-print("\nChecking soxr streaming resampling...")
-import soxr
-import numpy as np
-try:
-    resampler = soxr.ResampleStream(48000, 16000, 1, 'float32')
-    chunk = np.zeros(4800, dtype=np.float32)
-    out = resampler.resample_chunk(chunk)
-    print(f"[OK] soxr resampled 4800 samples to {len(out)} samples.")
-except Exception as e:
-    print(f"[ERROR] soxr check failed: {e}")
+

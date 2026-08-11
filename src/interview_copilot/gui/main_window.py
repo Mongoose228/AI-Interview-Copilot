@@ -69,22 +69,27 @@ class ResultWidget(QFrame):
         if not self.current_suggestion_text:
             self.lbl_ai.setStyleSheet("color: #4CAF50; font-size: 15px; font-weight: bold;")
         self.current_suggestion_text += token
-        self.lbl_ai.setText(f"💡 <b>AI:</b> {self.current_suggestion_text}")
+        formatted_text = self.current_suggestion_text.replace("\n", "<br>")
+        self.lbl_ai.setText(f"💡 <b>AI:</b> {formatted_text}")
 
-    def update_suggestion(self, suggestion):
+    def update_suggestion(self, suggestion, is_cancelled: bool = False):
+        if is_cancelled:
+            self.lbl_ai.setText("⏸️ <i>Skipped (new phrase arrived)</i>")
+            self.lbl_ai.setStyleSheet("color: #888888; font-size: 13px; font-style: italic; border: 1px solid rgba(136, 136, 136, 0.3); padding: 4px; border-radius: 4px;")
+            return
+            
         if not suggestion:
             self.lbl_ai.setText("❌ <i>Suggestion failed or dropped.</i>")
             self.lbl_ai.setStyleSheet("color: #F44336; font-size: 13px; font-style: italic; border: 1px solid rgba(244, 67, 54, 0.5); padding: 4px; border-radius: 4px;")
             return
             
         text = suggestion.answer_en
-        hedges = ["i'm not sure", "i am not sure", "i think", "might be", "could be", "maybe", "perhaps"]
-        is_unsure = any(h in text.lower() for h in hedges)
-        icon = "⚠️" if is_unsure else "✅"
+        icon = "⚠️" if suggestion.needs_verification else "✅"
         
         self.current_suggestion_text = text
+        formatted_text = text.replace("\n", "<br>")
         self.lbl_ai.setStyleSheet("color: #4CAF50; font-size: 15px; font-weight: bold;")
-        self.lbl_ai.setText(f"💡 <b>AI {icon}:</b> {text}")
+        self.lbl_ai.setText(f"💡 <b>AI {icon}:</b> {formatted_text}")
 
 
 class CopilotMainWindow(QMainWindow):
@@ -240,7 +245,7 @@ class CopilotMainWindow(QMainWindow):
     def update_suggestion(self, result: PipelineResult):
         widget = self._widget_map.get(result.id)
         if widget:
-            widget.update_suggestion(result.suggestion)
+            widget.update_suggestion(result.suggestion, getattr(result, "is_cancelled", False))
             QTimer.singleShot(50, self._scroll_to_bottom)
 
     def append_token(self, phrase_id, token: str):

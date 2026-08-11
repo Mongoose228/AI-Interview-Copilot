@@ -40,7 +40,6 @@ class InterviewPipeline:
         self.profile_mgr = ProfileManager()
 
         self.phrase_queue = queue.Queue(maxsize=20)
-        self.phrase_queue = queue.Queue(maxsize=20)
         self.transcript_queue = None
         self._loop = None
 
@@ -187,8 +186,19 @@ class InterviewPipeline:
                 suggestion = await suggestion_coro
         except asyncio.CancelledError:
             logger.info(f"Task for transcript '{transcript.text_en}' was cancelled.")
+            result = PipelineResult(
+                id=transcript.phrase_id,
+                transcript=transcript.text_en,
+                translation_ru=None,
+                suggestion=None,
+                profile=active_profile,
+                created_at=time.time(),
+                is_cancelled=True,
+            )
+            if self._suggestion_callback:
+                self._suggestion_callback(result)
             raise
-        except (RuntimeError, ValueError, TypeError, OSError) as e:
+        except Exception as e:
             logger.error(f"Processing error: {e}")
             if self._error_callback:
                 self._error_callback(f"Processing error: {e}")
@@ -222,7 +232,12 @@ class InterviewPipeline:
             except TimeoutError:
                 continue
 
-            # Emit early transcript to GUI
+            # Early exit for filler phrases
+            if is_filler(transcript.text_en):
+                logger.debug(f"Dropped filler from LLM processing: '{transcript.text_en}'")
+                continue
+
+            # Emit early transcript to GUI AFTER checking filler
             if self._transcript_callback:
                 initial_result = PipelineResult(
                     id=transcript.phrase_id,
@@ -234,19 +249,14 @@ class InterviewPipeline:
                 )
                 self._transcript_callback(initial_result)
 
+            if current_llm_task and not current_llm_task.done():
+                current_llm_task.cancel()
+
             self.transcript_history.append(transcript)
 
             # Trim history to prevent unbounded growth
             if len(self.transcript_history) > _MAX_HISTORY:
                 self.transcript_history = self.transcript_history[-_MAX_HISTORY:]
-
-            # Cancel-and-resend logic
-            if is_filler(transcript.text_en):
-                logger.debug(f"Dropped filler from LLM processing: '{transcript.text_en}'")
-                continue
-
-            if current_llm_task and not current_llm_task.done():
-                current_llm_task.cancel()
 
             history_snapshot = list(self.transcript_history[-5:])
 
@@ -254,7 +264,19 @@ class InterviewPipeline:
                 self._process_transcript(transcript, active_profile, history_snapshot)
             )
             self._background_tasks.add(current_llm_task)
-            current_llm_task.add_done_callback(self._background_tasks.discard)
+            
+            def on_task_done(t):
+                self._background_tasks.discard(t)
+                try:
+                    exc = t.exception()
+                    if exc and not isinstance(exc, asyncio.CancelledError):
+                        logger.error(f"Task failed with error: {exc}")
+                        if self._error_callback:
+                            self._error_callback(f"Task error: {exc}")
+                except asyncio.CancelledError:
+                    pass
+                    
+            current_llm_task.add_done_callback(on_task_done)
 
         # Cleanup: cancel any remaining tasks on shutdown
         for task in list(self._background_tasks):
@@ -316,12 +338,4 @@ class InterviewPipeline:
         for t in self._threads:
             t.join(timeout=2.0)
             
-        # Threads are dead — now it is safe to touch VAD state
-        last_phrase = self.vad.flush()
-        if last_phrase:
-            try:
-                self.phrase_queue.put(last_phrase, timeout=1.0)
-            except queue.Full:
-                pass
-                
         self.vad.reset()  # Reset VAD state on stop

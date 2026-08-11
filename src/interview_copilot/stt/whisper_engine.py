@@ -1,5 +1,6 @@
 import threading
 import time
+import math
 
 import numpy as np
 from faster_whisper import WhisperModel
@@ -112,7 +113,6 @@ class WhisperEngine:
                     return Transcript(phrase.id, "", "en", 0.0, stt_duration)
 
                 # Use exp(avg_logprob) as a more meaningful confidence metric than language_probability
-                import math
                 confidence = math.exp(avg_logprob)
 
                 return Transcript(

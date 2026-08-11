@@ -53,7 +53,8 @@ class OpenRouterSuggester:
             "Below is the candidate's profile. Use this to provide relevant and personalized answers.\n\n"
             f"--- CANDIDATE PROFILE ---\n{profile.content}\n-------------------------\n\n"
             "Your task is to provide a brief, professional, and accurate response to the interviewer's question.\n"
-            "Output your answer as plain text in English. Keep the answer concise (2-3 sentences max).\n"
+            "Output your answer as plain text. Provide your answer in two parts: first in English, then in Russian.\n"
+            "Separate the English and Russian answers with a blank line.\n"
             "Do NOT use markdown formatting, markdown blocks, or JSON."
         )
         return prompt
@@ -130,7 +131,7 @@ class OpenRouterSuggester:
                 needs_verification=needs_verify
             )
 
-        except (RuntimeError, ValueError, TypeError, OSError) as e:
+        except Exception as e:
             logger.error(f"OpenRouter Suggestion failed: {e}")
             return None
 

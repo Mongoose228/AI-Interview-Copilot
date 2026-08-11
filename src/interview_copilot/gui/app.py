@@ -106,19 +106,18 @@ def start_gui(device_id: str | None = None):
                 loop.run_until_complete(pipeline.start(device_id))
             finally:
                 loop.close()
-        except (RuntimeError, ValueError, TypeError, OSError) as e:
+        except Exception as e:
             logger.error(f"Pipeline thread error: {e}")
             signals.status_changed.emit(f"❌ Error: {e}")
 
     # Set up instantaneous shutdown
     def on_quit():
-        # Force the OS to instantly kill the process and all blocked background threads.
-        import os
-        os._exit(0)
+        if pipeline_ref:
+            pipeline_ref[0].stop()
 
     app.aboutToQuit.connect(on_quit)
 
-    pipeline_thread = threading.Thread(target=run_pipeline, daemon=False)
+    pipeline_thread = threading.Thread(target=run_pipeline, daemon=True)
     pipeline_thread.start()
 
     # Start Qt Event Loop
@@ -127,8 +126,12 @@ def start_gui(device_id: str | None = None):
     # Wait for the pipeline thread to gracefully exit
     pipeline_thread.join(timeout=3.0)
 
-    import os
-    os._exit(exit_code)
+    if pipeline_thread.is_alive():
+        import os
+        logger.warning("Pipeline thread did not terminate in time. Forcing exit.")
+        os._exit(exit_code)
+
+    sys.exit(exit_code)
 
 if __name__ == "__main__":
     start_gui()

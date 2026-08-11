@@ -40,6 +40,7 @@ packages = ["src/interview_copilot"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+select = ["E", "F", "W"]
 
 [tool.pytest.ini_options]
 minversion = "6.0"

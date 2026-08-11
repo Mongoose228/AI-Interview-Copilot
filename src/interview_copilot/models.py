@@ -66,3 +66,4 @@ class PipelineResult:
     profile: ProfileSnapshot | None
     timings: list[StageTiming] = field(default_factory=list)
     created_at: float = 0.0
+    is_cancelled: bool = False

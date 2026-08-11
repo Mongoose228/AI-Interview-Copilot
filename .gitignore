@@ -20,6 +20,7 @@ venv.bak/
 *.wav
 *.mp3
 *.log
+*.onnx
 
 # App state
 .copilot_state.json

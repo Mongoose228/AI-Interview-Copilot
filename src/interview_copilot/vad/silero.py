@@ -1,5 +1,9 @@
+import time
 import urllib.request
+import urllib.error
 import uuid
+import shutil
+import hashlib
 from collections import deque
 from pathlib import Path
 
@@ -9,8 +13,11 @@ from ..config import config
 from ..logging_config import logger
 from ..models import AudioChunk, SpeechPhrase
 
-# Pre-roll buffer size: ~500ms at 16kHz in 512-sample chunks ≈ 15 chunks
-_PREROLL_CHUNKS = 15
+# Expected sha256 of silero_vad.onnx (v4.0)
+_ONNX_SHA256 = "5605d3c01c0cf07ed9f30325fddb73248c8b4aebda3ec39cb16eebc89d280eec"
+
+# Pre-roll buffer size
+_PREROLL_CHUNKS = max(1, int(config.VAD_SPEECH_PAD_MS / (512 / 16.0)))
 
 # ONNX model URL (v4 - compatible with direct onnxruntime usage)
 _ONNX_URL = "https://github.com/snakers4/silero-vad/raw/v4.0/files/silero_vad.onnx"
@@ -31,8 +38,24 @@ class SileroVAD:
             if not model_path.exists():
                 logger.info(f"Downloading Silero VAD model to {model_path}...")
                 model_path.parent.mkdir(parents=True, exist_ok=True)
-                urllib.request.urlretrieve(_ONNX_URL, model_path)
-                logger.info("Download complete.")
+                
+                tmp_path = model_path.with_suffix(".tmp")
+                try:
+                    with urllib.request.urlopen(_ONNX_URL, timeout=30) as response, open(tmp_path, 'wb') as out_file:
+                        shutil.copyfileobj(response, out_file)
+                    
+                    # Verify sha256
+                    with open(tmp_path, 'rb') as f:
+                        file_hash = hashlib.sha256(f.read()).hexdigest()
+                    if file_hash != _ONNX_SHA256:
+                        raise ValueError(f"Checksum mismatch: expected {_ONNX_SHA256}, got {file_hash}")
+                        
+                    tmp_path.replace(model_path)
+                    logger.info("Download complete.")
+                except Exception as e:
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+                    raise e
             
             # Initialize InferenceSession
             opts = ort.SessionOptions()
@@ -54,7 +77,7 @@ class SileroVAD:
             
             self._reset_onnx_state()
             self._vad_lib_available = True
-        except (RuntimeError, ValueError, TypeError, OSError) as e:
+        except Exception as e:
             logger.error(f"Failed to initialize ONNX VAD: {e}")
 
         self._sample_rate = 16000
@@ -83,7 +106,7 @@ class SileroVAD:
             return 0.0
         # Expected shape: (1, 512)
         x = chunk.reshape(1, 512).astype(np.float32)
-        sr = np.array([self._sample_rate], dtype=np.int64)
+        sr = np.array(self._sample_rate, dtype=np.int64)
         
         if self._model_version == 4:
             ort_inputs = {
@@ -148,6 +171,7 @@ class SileroVAD:
                         # START SPEAKING
                         self._is_speaking = True
                         self._phrase_buffer = list(self._preroll_buffer)
+                        self._preroll_buffer.clear()
                         self._phrase_buffer.append(vad_chunk)
                         self._current_phrase_start_time = chunk.captured_at
                         self._phrase_duration_ms = len(self._phrase_buffer) * (512 / 16.0)
@@ -214,7 +238,6 @@ class SileroVAD:
             return None
 
         if self._phrase_buffer and self._phrase_duration_ms > config.VAD_MIN_SPEECH_MS:
-            import time
             full_phrase_audio = np.concatenate(self._phrase_buffer)
             duration_s = len(full_phrase_audio) / self._sample_rate
             phrase = SpeechPhrase(
