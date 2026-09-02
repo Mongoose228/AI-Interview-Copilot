@@ -29,13 +29,13 @@ class Transcript:
     language: str
     confidence: float
     stt_duration_s: float
+    speaker: str = "interviewer"  # "interviewer" | "candidate"
 
 
 @dataclass(frozen=True)
 class SuggestionResult:
     answer_en: str
-    answer_ru: str | None = None
-    needs_verification: bool = False
+    has_hedging: bool = False  # True if LLM used uncertain language
 
 
 @dataclass(frozen=True)
@@ -67,3 +67,4 @@ class PipelineResult:
     timings: list[StageTiming] = field(default_factory=list)
     created_at: float = 0.0
     is_cancelled: bool = False
+    answer_ru: str | None = None

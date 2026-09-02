@@ -42,6 +42,7 @@ class WhisperEngine:
             device=self._device,
             compute_type=self._compute_type,
             local_files_only=False,  # Allows auto-download
+            cpu_threads=config.WHISPER_CPU_THREADS,
         )
         print("Whisper model loaded successfully.")
 
@@ -59,7 +60,12 @@ class WhisperEngine:
         with self._lock:
             try:
                 segments, _ = self._model.transcribe(
-                    dummy_audio, beam_size=1, language="en", condition_on_previous_text=False
+                    dummy_audio, 
+                    beam_size=config.WHISPER_BEAM_SIZE, 
+                    language="en", 
+                    condition_on_previous_text=False,
+                    temperature=0.0,
+                    without_timestamps=True
                 )
                 # Consume generator
                 list(segments)
@@ -81,6 +87,8 @@ class WhisperEngine:
                     language="en",
                     condition_on_previous_text=False,
                     vad_filter=False,  # We already do VAD
+                    temperature=0.0,
+                    without_timestamps=True,
                 )
 
                 # Consume generator completely inside the lock

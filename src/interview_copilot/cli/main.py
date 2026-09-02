@@ -7,6 +7,7 @@ from interview_copilot.audio.soundcard_wasapi import SoundCardWASAPIBackend
 from interview_copilot.pipeline import InterviewPipeline
 from interview_copilot.stt.whisper_engine import WhisperEngine
 from interview_copilot.vad.silero import SileroVAD
+from interview_copilot.config import config
 
 
 def cmd_devices(args):
@@ -27,10 +28,7 @@ def cmd_devices(args):
 def cmd_capture_test(args):
     """Test audio capture and show real-time RMS (volume level)."""
     backend = SoundCardWASAPIBackend()
-
-    device_id = None
-    if args.device:
-        device_id = args.device
+    device_id = args.device or config.AUDIO_DEVICE
 
     print("Starting audio capture test... Press Ctrl+C to stop.")
     try:
@@ -61,7 +59,7 @@ def cmd_vad_test(args):
     backend = SoundCardWASAPIBackend()
     vad = SileroVAD()
 
-    device_id = args.device if args.device else None
+    device_id = args.device or config.AUDIO_DEVICE
 
     print(
         "Starting VAD test... Speak into the loopback to see phrase detection. Press Ctrl+C to stop."
@@ -96,7 +94,7 @@ def cmd_transcribe_test(args):
     vad = SileroVAD()
     stt = WhisperEngine()
 
-    device_id = args.device if args.device else None
+    device_id = args.device or config.AUDIO_DEVICE
 
     print("Starting STT test... Speak English into the loopback. Press Ctrl+C to stop.")
     try:
@@ -130,7 +128,7 @@ def cmd_run(args):
     import asyncio
 
     pipeline = InterviewPipeline()
-    device_id = args.device if args.device else None
+    device_id = args.device or config.AUDIO_DEVICE
 
     print("Starting AI Interview Copilot Pipeline... Press Ctrl+C to stop.")
     try:
@@ -148,7 +146,7 @@ def cmd_start(args):
     try:
         from interview_copilot.gui.app import start_gui
 
-        device_id = args.device if args.device else None
+        device_id = args.device or config.AUDIO_DEVICE
         start_gui(device_id)
     except (RuntimeError, ValueError, TypeError, OSError) as e:
         print(f"\nGUI error: {e}")

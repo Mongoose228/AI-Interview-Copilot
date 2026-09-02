@@ -6,6 +6,7 @@ from openai import AsyncOpenAI
 from ..config import config
 from ..logging_config import logger
 from ..models import ProfileSnapshot, SuggestionResult, Transcript
+from .sanitize import sanitize_for_prompt
 
 _HEDGING_TERMS = {
     "i'm not sure", "i am not sure", "i think", "might be", "could be", 
@@ -47,14 +48,25 @@ class OpenRouterSuggester:
             )
             logger.info(f"OpenRouter Suggester initialized with model {self._model}.")
 
+    async def warm_up(self):
+        """Pre-warm the TCP+TLS connection to avoid cold-start latency on first real request."""
+        if not self._client:
+            return
+        try:
+            # Lightweight call that establishes the connection pool
+            await self._client.models.list()
+            logger.info("OpenRouter connection pre-warmed.")
+        except Exception as e:
+            logger.warning(f"OpenRouter warm-up failed (non-fatal): {e}")
+
     def _build_system_prompt(self, profile: ProfileSnapshot) -> str:
+        safe_content = sanitize_for_prompt(profile.content)
         prompt = (
             "You are an AI Interview Copilot assisting a candidate during a technical interview.\n"
             "Below is the candidate's profile. Use this to provide relevant and personalized answers.\n\n"
-            f"--- CANDIDATE PROFILE ---\n{profile.content}\n-------------------------\n\n"
+            f"--- CANDIDATE PROFILE ---\n{safe_content}\n-------------------------\n\n"
             "Your task is to provide a brief, professional, and accurate response to the interviewer's question.\n"
-            "Output your answer as plain text. Provide your answer in two parts: first in English, then in Russian.\n"
-            "Separate the English and Russian answers with a blank line.\n"
+            "Output your answer as plain text in English only.\n"
             "Do NOT use markdown formatting, markdown blocks, or JSON."
         )
         return prompt
@@ -76,12 +88,14 @@ class OpenRouterSuggester:
         
         context_lines = []
         for i, t in enumerate(recent_transcripts):
-            if not t.text_en:
+            safe_text = sanitize_for_prompt(t.text_en)
+            if not safe_text:
                 continue
+            label = "Interviewer" if t.speaker == "interviewer" else "Candidate"
             if i == len(recent_transcripts) - 1:
-                context_lines.append(f'Current question: "{t.text_en}"')
+                context_lines.append(f'Current question ({label}): "{safe_text}"')
             else:
-                context_lines.append(f'- Interviewer: "{t.text_en}"')
+                context_lines.append(f'- {label}: "{safe_text}"')
         
         context = "\n".join(context_lines)
 
@@ -108,8 +122,9 @@ class OpenRouterSuggester:
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=0.2,
-                max_tokens=1000,
+                max_tokens=config.MAX_LLM_TOKENS,
                 stream=True,
+                extra_body={"provider": {"sort": "throughput"}},
             )
 
             full_text = ""
@@ -124,11 +139,11 @@ class OpenRouterSuggester:
             if not full_text:
                 return None
 
-            needs_verify = _detect_needs_verification(full_text)
+            has_hedging = _detect_needs_verification(full_text)
 
             return SuggestionResult(
                 answer_en=full_text,
-                needs_verification=needs_verify
+                has_hedging=has_hedging
             )
 
         except Exception as e:

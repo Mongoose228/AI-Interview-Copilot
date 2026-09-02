@@ -23,10 +23,21 @@ class NLLBTranslator(Translator):
             self._ready = True
 
             logger.info("NLLB Translator initialized successfully.")
+            logger.warning(
+                "⚠️ NLLB on CPU is slow (1-3s per phrase). "
+                "Consider using TRANSLATION_BACKEND=deepl for real-time usage."
+            )
         except ImportError:
             logger.error("transformers or torch not installed. Cannot use NLLB.")
         except Exception as e:
             logger.error(f"Failed to initialize NLLB: {e}")
+        if not self._ready:
+            logger.warning("NLLBTranslator initialized but dependencies are missing. It will not work.")
+
+    @property
+    def is_available(self) -> bool:
+        """Return True if the NLLB model initialized successfully."""
+        return self._ready
 
     def translate(self, text: str, source_lang: str = "EN", target_lang: str = "RU") -> str | None:
         if not self._ready or not self._model or not self._tokenizer or not text:

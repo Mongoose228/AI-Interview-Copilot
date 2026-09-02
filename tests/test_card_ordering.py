@@ -24,7 +24,7 @@ def test_card_ordering():
     assert window._result_widgets[1].phrase_id == res2.id
     
     # Suggestion for res1 arrives AFTER res2 was added
-    res1_updated = PipelineResult(res1.id, "First transcript", None, SuggestionResult("Answer 1"), None)
+    res1_updated = PipelineResult(res1.id, "First transcript", None, SuggestionResult(answer_en="Answer 1"), None)
     window.update_suggestion(res1_updated)
     
     # The order of widgets should NOT change

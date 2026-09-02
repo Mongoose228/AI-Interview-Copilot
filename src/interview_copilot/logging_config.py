@@ -27,6 +27,11 @@ logger = setup_logging()
 
 
 def log_sensitive(msg: str, *args, **kwargs):
-    """Log sensitive data only if privacy mode is disabled and text logging is enabled."""
+    """Log sensitive data only if privacy mode is disabled and text logging is enabled.
+
+    NOTE: This controls LOCAL log output only. Transcripts and candidate profile
+    are always sent to the OpenRouter API for LLM suggestions regardless of this
+    setting. See gui/privacy_banner.py for the user-facing disclosure.
+    """
     if not config.LOG_OBFUSCATION_ENABLED and config.TEXT_LOGGING_ENABLED:
         logger.info(msg, *args, **kwargs)

@@ -4,6 +4,7 @@ import sys
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -15,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..models import PipelineResult
+from .privacy_banner import PrivacyBanner
 
 # Maximum number of result cards to keep in the overlay
 _MAX_RESULT_CARDS = 50
@@ -51,6 +53,13 @@ class ResultWidget(QFrame):
         lbl_en.setStyleSheet("color: #CCCCCC; font-size: 13px;")
         layout.addWidget(lbl_en)
 
+        # Russian translation of question (populated later via update_suggestion)
+        self.lbl_ru = QLabel("")
+        self.lbl_ru.setWordWrap(True)
+        self.lbl_ru.setStyleSheet("color: #90CAF9; font-size: 13px;")
+        self.lbl_ru.setVisible(False)
+        layout.addWidget(self.lbl_ru)
+
         # AI Suggestion Placeholder
         self.line = QFrame()
         self.line.setFrameShape(QFrame.HLine)
@@ -62,6 +71,13 @@ class ResultWidget(QFrame):
         self.lbl_ai.setWordWrap(True)
         self.lbl_ai.setStyleSheet("color: #888888; font-size: 13px; font-style: italic;")
         layout.addWidget(self.lbl_ai)
+
+        # Russian translation of AI answer (populated later)
+        self.lbl_ai_ru = QLabel("")
+        self.lbl_ai_ru.setWordWrap(True)
+        self.lbl_ai_ru.setStyleSheet("color: #81C784; font-size: 14px;")
+        self.lbl_ai_ru.setVisible(False)
+        layout.addWidget(self.lbl_ai_ru)
         
         self.current_suggestion_text = ""
 
@@ -84,12 +100,27 @@ class ResultWidget(QFrame):
             return
             
         text = suggestion.answer_en
-        icon = "⚠️" if suggestion.needs_verification else "✅"
-        
+        # Only show a warning when LLM hedges. No green checkmark —
+        # absence of hedging does NOT mean the answer is verified.
+        icon = " ⚠️" if suggestion.has_hedging else ""
+
         self.current_suggestion_text = text
         formatted_text = text.replace("\n", "<br>")
         self.lbl_ai.setStyleSheet("color: #4CAF50; font-size: 15px; font-weight: bold;")
-        self.lbl_ai.setText(f"💡 <b>AI {icon}:</b> {formatted_text}")
+        self.lbl_ai.setText(f"💡 <b>AI{icon}:</b> {formatted_text}")
+
+    def set_translation(self, translation_ru: str):
+        """Update the Russian translation of the interviewer's question."""
+        if translation_ru:
+            self.lbl_ru.setText(f"🇷🇺 <b>RU:</b> {translation_ru}")
+            self.lbl_ru.setVisible(True)
+
+    def set_answer_ru(self, answer_ru: str):
+        """Update the Russian translation of the AI answer."""
+        if answer_ru:
+            formatted = answer_ru.replace("\n", "<br>")
+            self.lbl_ai_ru.setText(f"🇷🇺 <b>AI RU:</b> {formatted}")
+            self.lbl_ai_ru.setVisible(True)
 
 
 class CopilotMainWindow(QMainWindow):
@@ -147,11 +178,14 @@ class CopilotMainWindow(QMainWindow):
                 color: #FFFFFF;
             }
         """)
-        from PySide6.QtWidgets import QApplication
         self.close_btn.clicked.connect(QApplication.instance().quit)
         self.header_layout.addWidget(self.close_btn)
 
         self.main_layout.addLayout(self.header_layout)
+
+        # Privacy notice (auto-hides after acceptance)
+        self.privacy_banner = PrivacyBanner()
+        self.main_layout.addWidget(self.privacy_banner)
 
         # Scroll Area for results
         self.scroll_area = QScrollArea()
@@ -207,8 +241,18 @@ class CopilotMainWindow(QMainWindow):
             from ..logging_config import logger
             logger.warning(f"SetWindowDisplayAffinity not available: {e}")
 
+    def set_error(self, text: str):
+        """Show a persistent error in the header. Not cleared by set_status."""
+        self._has_error = True
+        self.status_lbl.setText(text)
+        self.status_lbl.setStyleSheet(
+            "color: #F44336; font-size: 12px; font-weight: bold;"
+        )
+
     def set_status(self, text: str):
         """Update the status label in the header."""
+        if getattr(self, '_has_error', False) and not text:
+            return  # Don't clear an existing error with an empty status
         self.status_lbl.setText(text)
 
     def eventFilter(self, obj, event):
@@ -245,7 +289,11 @@ class CopilotMainWindow(QMainWindow):
     def update_suggestion(self, result: PipelineResult):
         widget = self._widget_map.get(result.id)
         if widget:
+            if getattr(result, "translation_ru", None):
+                widget.set_translation(result.translation_ru)
             widget.update_suggestion(result.suggestion, getattr(result, "is_cancelled", False))
+            if getattr(result, "answer_ru", None):
+                widget.set_answer_ru(result.answer_ru)
             QTimer.singleShot(50, self._scroll_to_bottom)
 
     def append_token(self, phrase_id, token: str):

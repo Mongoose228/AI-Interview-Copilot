@@ -12,6 +12,9 @@ from .signals import PipelineSignals
 
 def start_gui(device_id: str | None = None):
     """Entry point for the GUI app."""
+    from ..config import config
+    device_id = device_id or config.AUDIO_DEVICE
+
     app = QApplication(sys.argv)
 
     # Global stylesheet for the app
@@ -55,7 +58,7 @@ def start_gui(device_id: str | None = None):
     signals.suggestion_ready.connect(window.update_suggestion)
     signals.suggestion_token.connect(window.append_token)
     signals.error_occurred.connect(
-        lambda msg: window.set_status(f"⚠️ {msg}")
+        lambda msg: window.set_error(f"⚠️ {msg}")
     )
     signals.status_changed.connect(window.set_status)
     signals.audio_status_changed.connect(

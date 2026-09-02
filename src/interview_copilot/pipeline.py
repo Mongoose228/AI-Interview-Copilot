@@ -27,14 +27,30 @@ class InterviewPipeline:
             raise NotImplementedError(f"Audio backend '{config.AUDIO_BACKEND}' is not implemented. Use 'soundcard'.")
         self.audio = SoundCardWASAPIBackend()
         self.vad = SileroVAD()
+        if not self.vad.is_available:
+            logger.error("VAD model failed to load. Speech detection will not work.")
+            self._vad_init_error = True
+        else:
+            self._vad_init_error = False
         self.stt = WhisperEngine()
 
         # Translation strategy — single config key
         self.translator = None
-        if config.TRANSLATION_BACKEND == "deepl":
-            self.translator = DeepLTranslator()
-        elif config.TRANSLATION_BACKEND == "nllb":
+        if config.TRANSLATION_BACKEND == "nllb":
             self.translator = NLLBTranslator()
+            if not self.translator.is_available:
+                logger.error(
+                    "NLLB translator failed to initialize. "
+                    "Install with: pip install -e '.[nllb]'"
+                )
+                # Notify GUI if callback is available
+                if getattr(self, '_error_callback', None):
+                    self._error_callback(
+                        "NLLB translation unavailable. "
+                        "Install: pip install -e '.[nllb]'"
+                    )
+        elif config.TRANSLATION_BACKEND == "deepl":
+            self.translator = DeepLTranslator()
 
         self.suggester = OpenRouterSuggester()
         self.profile_mgr = ProfileManager()
@@ -65,6 +81,13 @@ class InterviewPipeline:
 
     def _capture_and_vad_worker(self, device_id: str | None = None):
         logger.info("Audio capture thread started.")
+        if getattr(self, '_vad_init_error', False):
+            logger.error("VAD unavailable, capture thread cannot produce results.")
+            if self._error_callback:
+                self._error_callback(
+                    "⚠️ VAD model failed to load. Speech detection is disabled. Check logs for details."
+                )
+            return
         retries = 0
 
         while not self._stop_event.is_set():
@@ -127,6 +150,8 @@ class InterviewPipeline:
         while not self._stop_event.is_set():
             try:
                 phrase = self.phrase_queue.get(timeout=0.5)
+                vad_to_stt_gap = time.time() - phrase.vad_end_at
+                logger.debug(f"[Timing] VAD→STT gap: {vad_to_stt_gap:.3f}s")
                 transcript = self.stt.transcribe(phrase)
                 if transcript.text_en and self._loop and self.transcript_queue:
                     self._loop.call_soon_threadsafe(self.transcript_queue.put_nowait, transcript)
@@ -211,60 +236,103 @@ class InterviewPipeline:
             profile=active_profile,
             timings=timings,
             created_at=time.time(),
+            answer_ru=None,
         )
+
+        # Translate the LLM answer to RU if translator is available
+        if suggestion and suggestion.answer_en and self.translator:
+            try:
+                answer_ru = await asyncio.to_thread(
+                    self.translator.translate,
+                    suggestion.answer_en,
+                )
+                # Rebuild result with answer_ru (frozen dataclass)
+                result = PipelineResult(
+                    id=result.id,
+                    transcript=result.transcript,
+                    translation_ru=result.translation_ru,
+                    suggestion=result.suggestion,
+                    profile=result.profile,
+                    timings=result.timings,
+                    created_at=result.created_at,
+                    answer_ru=answer_ru,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to translate LLM answer: {e}")
 
         self._display_result(result)
         if self._suggestion_callback:
             self._suggestion_callback(result)
 
     async def _async_orchestrator(self):
+        """Main async loop: accumulate transcripts, debounce, then send to LLM."""
         logger.info("Async orchestrator started.")
         active_profile = self.profile_mgr.load_active_profile()
 
+        # Pre-warm OpenRouter connection (DNS + TLS)
+        await self.suggester.warm_up()
+
         self._background_tasks = set()
         current_llm_task = None
+        pending_transcripts: list[Transcript] = []
+        debounce_task: asyncio.Task | None = None
+
+        # Report NLLB initialization failure to GUI (callback is now set)
+        if (config.TRANSLATION_BACKEND == "nllb"
+                and self.translator
+                and not self.translator.is_available):
+            if self._error_callback:
+                self._error_callback(
+                    "⚠️ NLLB translation unavailable. "
+                    "Install with: pip install -e '.[nllb]'"
+                )
 
         from .suggestion.phrase_filter import is_filler
 
-        while not self._stop_event.is_set():
-            try:
-                transcript = await asyncio.wait_for(self.transcript_queue.get(), timeout=1.0)
-            except TimeoutError:
-                continue
+        async def flush_pending():
+            """Wait for debounce delay, then merge and send to LLM."""
+            nonlocal current_llm_task, pending_transcripts
 
-            # Early exit for filler phrases
-            if is_filler(transcript.text_en):
-                logger.debug(f"Dropped filler from LLM processing: '{transcript.text_en}'")
-                continue
+            await asyncio.sleep(config.LLM_DEBOUNCE_DELAY_S)
 
-            # Emit early transcript to GUI AFTER checking filler
-            if self._transcript_callback:
-                initial_result = PipelineResult(
-                    id=transcript.phrase_id,
-                    transcript=transcript.text_en,
-                    translation_ru=None,
-                    suggestion=None,
-                    profile=active_profile,
-                    created_at=time.time()
-                )
-                self._transcript_callback(initial_result)
+            if not pending_transcripts:
+                return
 
+            # Merge all accumulated transcript segments
+            segments = pending_transcripts
+            pending_transcripts = []
+
+            merged_text = " ".join(t.text_en for t in segments)
+            merged_transcript = Transcript(
+                phrase_id=segments[-1].phrase_id,  # Use last segment's ID
+                text_en=merged_text,
+                language=segments[0].language,
+                confidence=min(t.confidence for t in segments),
+                stt_duration_s=sum(t.stt_duration_s for t in segments),
+            )
+
+            logger.info(
+                f"Debounce: merged {len(segments)} segment(s) into one "
+                f"({len(merged_text)} chars)"
+            )
+
+            # Cancel previous LLM task only now (not on every fragment)
             if current_llm_task and not current_llm_task.done():
                 current_llm_task.cancel()
 
-            self.transcript_history.append(transcript)
-
-            # Trim history to prevent unbounded growth
+            self.transcript_history.append(merged_transcript)
             if len(self.transcript_history) > _MAX_HISTORY:
                 self.transcript_history = self.transcript_history[-_MAX_HISTORY:]
 
             history_snapshot = list(self.transcript_history[-5:])
 
             current_llm_task = asyncio.create_task(
-                self._process_transcript(transcript, active_profile, history_snapshot)
+                self._process_transcript(
+                    merged_transcript, active_profile, history_snapshot
+                )
             )
             self._background_tasks.add(current_llm_task)
-            
+
             def on_task_done(t):
                 self._background_tasks.discard(t)
                 try:
@@ -275,8 +343,48 @@ class InterviewPipeline:
                             self._error_callback(f"Task error: {exc}")
                 except asyncio.CancelledError:
                     pass
-                    
+
             current_llm_task.add_done_callback(on_task_done)
+
+        while not self._stop_event.is_set():
+            try:
+                transcript = await asyncio.wait_for(
+                    self.transcript_queue.get(), timeout=1.0
+                )
+            except TimeoutError:
+                continue
+
+            # Early exit for filler phrases
+            if is_filler(transcript.text_en):
+                logger.debug(
+                    f"Dropped filler from LLM processing: '{transcript.text_en}'"
+                )
+                continue
+
+            # Emit early transcript card to GUI immediately
+            if self._transcript_callback:
+                initial_result = PipelineResult(
+                    id=transcript.phrase_id,
+                    transcript=transcript.text_en,
+                    translation_ru=None,
+                    suggestion=None,
+                    profile=active_profile,
+                    created_at=time.time(),
+                )
+                self._transcript_callback(initial_result)
+
+            # Accumulate transcript segment
+            pending_transcripts.append(transcript)
+
+            # Reset debounce timer: cancel old, start new
+            if debounce_task and not debounce_task.done():
+                debounce_task.cancel()
+
+            debounce_task = asyncio.create_task(flush_pending())
+            self._background_tasks.add(debounce_task)
+            debounce_task.add_done_callback(
+                lambda t: self._background_tasks.discard(t)
+            )
 
         # Cleanup: cancel any remaining tasks on shutdown
         for task in list(self._background_tasks):
@@ -301,11 +409,19 @@ class InterviewPipeline:
                 print(f"🇷🇺  [RU]: {result.translation_ru}")
             if result.suggestion:
                 print("-" * 60)
-                verify_mark = "⚠️ (VERIFY)" if result.suggestion.needs_verification else "✅"
+                hedging_mark = " ⚠️(uncertain)" if result.suggestion.has_hedging else ""
                 log_sensitive(f"[AI EN]: {result.suggestion.answer_en}")
-                print(f"💡 [AI EN] {verify_mark}: {result.suggestion.answer_en}")
-                print(f"💡 [AI RU]: {result.suggestion.answer_ru}")
+                print(f"💡 [AI EN]{hedging_mark}: {result.suggestion.answer_en}")
+                if getattr(result, "answer_ru", None):
+                    log_sensitive(f"[AI RU]: {result.answer_ru}")
+                    print(f"💡 [AI RU]: {result.answer_ru}")
             print("=" * 60 + "\n")
+
+        # Log stage timings for performance analysis (no private data, always log)
+        if result.timings:
+            timing_parts = [f"{t.stage_name}={t.duration_s:.2f}s" for t in result.timings]
+            total = sum(t.duration_s for t in result.timings)
+            logger.info(f"[Timings] {' → '.join(timing_parts)} | total={total:.2f}s")
 
     async def start(self, device_id: str | None = None):
         self._stop_event.clear()

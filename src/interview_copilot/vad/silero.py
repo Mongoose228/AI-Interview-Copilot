@@ -93,6 +93,11 @@ class SileroVAD:
         # Pre-roll ring buffer: keeps last N chunks so we don't clip speech onset
         self._preroll_buffer: deque[np.ndarray] = deque(maxlen=_PREROLL_CHUNKS)
 
+    @property
+    def is_available(self) -> bool:
+        """Return True if VAD model loaded successfully."""
+        return self._vad_lib_available
+
     def _reset_onnx_state(self):
         if self._model_version == 4:
             self._h = np.zeros((2, 1, 64), dtype=np.float32)
