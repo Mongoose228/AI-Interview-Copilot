@@ -62,7 +62,8 @@ def cmd_vad_test(args):
     device_id = args.device or config.AUDIO_DEVICE
 
     print(
-        "Starting VAD test... Speak into the loopback to see phrase detection. Press Ctrl+C to stop."
+        "Starting VAD test... Speak into the loopback"
+        " to see phrase detection. Press Ctrl+C to stop."
     )
     try:
         backend.start(device_id=device_id)
@@ -77,7 +78,8 @@ def cmd_vad_test(args):
 
             for p in phrases:
                 print(
-                    f"\n[VAD] Phrase detected! Duration: {p.duration_s:.2f}s | Start: {p.captured_at:.2f}"
+                    f"\n[VAD] Phrase detected! "
+                    f"Duration: {p.duration_s:.2f}s | Start: {p.captured_at:.2f}"
                 )
     except KeyboardInterrupt:
         print("\nStopping VAD test...")

@@ -78,7 +78,7 @@ class ResultWidget(QFrame):
         self.lbl_ai_ru.setStyleSheet("color: #81C784; font-size: 14px;")
         self.lbl_ai_ru.setVisible(False)
         layout.addWidget(self.lbl_ai_ru)
-        
+
         self.current_suggestion_text = ""
 
     def append_token(self, token: str):
@@ -91,14 +91,22 @@ class ResultWidget(QFrame):
     def update_suggestion(self, suggestion, is_cancelled: bool = False):
         if is_cancelled:
             self.lbl_ai.setText("⏸️ <i>Skipped (new phrase arrived)</i>")
-            self.lbl_ai.setStyleSheet("color: #888888; font-size: 13px; font-style: italic; border: 1px solid rgba(136, 136, 136, 0.3); padding: 4px; border-radius: 4px;")
+            self.lbl_ai.setStyleSheet(
+                "color: #888888; font-size: 13px; font-style: italic;"
+                " border: 1px solid rgba(136, 136, 136, 0.3);"
+                " padding: 4px; border-radius: 4px;"
+            )
             return
-            
+
         if not suggestion:
             self.lbl_ai.setText("❌ <i>Suggestion failed or dropped.</i>")
-            self.lbl_ai.setStyleSheet("color: #F44336; font-size: 13px; font-style: italic; border: 1px solid rgba(244, 67, 54, 0.5); padding: 4px; border-radius: 4px;")
+            self.lbl_ai.setStyleSheet(
+                "color: #F44336; font-size: 13px; font-style: italic;"
+                " border: 1px solid rgba(244, 67, 54, 0.5);"
+                " padding: 4px; border-radius: 4px;"
+            )
             return
-            
+
         text = suggestion.answer_en
         # Only show a warning when LLM hedges. No green checkmark —
         # absence of hedging does NOT mean the answer is verified.
@@ -266,7 +274,7 @@ class CopilotMainWindow(QMainWindow):
                 self._drag_pos = event.globalPosition().toPoint()
                 return True # Consume to prevent text selection while dragging
         elif event.type() == event.Type.MouseButtonRelease and event.button() == Qt.LeftButton:
-                self._drag_pos = None
+            self._drag_pos = None
         return super().eventFilter(obj, event)
 
     def add_transcript(self, result: PipelineResult):

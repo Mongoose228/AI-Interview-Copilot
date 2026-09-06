@@ -29,41 +29,51 @@ class SileroVAD:
         self._session = None
         self._h = None
         self._c = None
-        
+
         try:
             import onnxruntime as ort
-            
+
             # Download ONNX if missing
             model_path = Path(config.CONTEXT_DIR) / "silero_vad.onnx"
             if not model_path.exists():
                 logger.info(f"Downloading Silero VAD model to {model_path}...")
                 model_path.parent.mkdir(parents=True, exist_ok=True)
-                
+
                 tmp_path = model_path.with_suffix(".tmp")
                 try:
-                    with urllib.request.urlopen(_ONNX_URL, timeout=30) as response, open(tmp_path, 'wb') as out_file:
+                    with (
+                        urllib.request.urlopen(_ONNX_URL, timeout=30) as response,
+                        open(tmp_path, 'wb') as out_file,
+                    ):
                         shutil.copyfileobj(response, out_file)
-                    
+
                     # Verify sha256
                     with open(tmp_path, 'rb') as f:
                         file_hash = hashlib.sha256(f.read()).hexdigest()
                     if file_hash != _ONNX_SHA256:
-                        raise ValueError(f"Checksum mismatch: expected {_ONNX_SHA256}, got {file_hash}")
-                        
+                        raise ValueError(
+                            f"Checksum mismatch: expected {_ONNX_SHA256},"
+                            f" got {file_hash}"
+                        )
+
                     tmp_path.replace(model_path)
                     logger.info("Download complete.")
                 except Exception as e:
                     if tmp_path.exists():
                         tmp_path.unlink()
                     raise e
-            
+
             # Initialize InferenceSession
             opts = ort.SessionOptions()
             opts.inter_op_num_threads = 1
             opts.intra_op_num_threads = 1
             # Run on CPU only
-            self._session = ort.InferenceSession(str(model_path), sess_options=opts, providers=["CPUExecutionProvider"])
-            
+            self._session = ort.InferenceSession(
+                str(model_path),
+                sess_options=opts,
+                providers=["CPUExecutionProvider"],
+            )
+
             # Detect model version by checking input names
             input_names = [inp.name for inp in self._session.get_inputs()]
             if 'h' in input_names and 'c' in input_names:
@@ -74,7 +84,7 @@ class SileroVAD:
                 # v5 model: combined state, shape (2, 1, 128)
                 self._model_version = 5
                 logger.info("Detected Silero VAD v5 ONNX model.")
-            
+
             self._reset_onnx_state()
             self._vad_lib_available = True
         except Exception as e:
@@ -112,7 +122,7 @@ class SileroVAD:
         # Expected shape: (1, 512)
         x = chunk.reshape(1, 512).astype(np.float32)
         sr = np.array(self._sample_rate, dtype=np.int64)
-        
+
         if self._model_version == 4:
             ort_inputs = {
                 'input': x,
@@ -130,7 +140,7 @@ class SileroVAD:
             }
             ort_outs = self._session.run(None, ort_inputs)
             out, self._h = ort_outs[0], ort_outs[1]
-        
+
         return float(out[0][0])
 
     def reset(self):
@@ -188,14 +198,14 @@ class SileroVAD:
                         self._silence_duration_ms += 512 / 16.0
                         self._phrase_buffer.append(vad_chunk)
                         self._phrase_duration_ms += 512 / 16.0
-                        
+
                         if self._silence_duration_ms >= config.VAD_SILENCE_MS:
                             # END SPEAKING
                             self._is_speaking = False
-                            
+
                             full_phrase_audio = np.concatenate(self._phrase_buffer)
                             duration_s = len(full_phrase_audio) / self._sample_rate
-                            
+
                             if duration_s * 1000 >= config.VAD_MIN_SPEECH_MS:
                                 phrases.append(
                                     SpeechPhrase(
@@ -206,7 +216,7 @@ class SileroVAD:
                                         vad_end_at=chunk.captured_at,
                                     )
                                 )
-                                
+
                             self._phrase_buffer = []
                             self._phrase_duration_ms = 0
                             self._silence_duration_ms = 0
@@ -215,7 +225,11 @@ class SileroVAD:
                         self._preroll_buffer.append(vad_chunk)
 
                 # Check max phrase length to force split
-                if self._is_speaking and self._phrase_duration_ms > config.VAD_MAX_PHRASE_SECONDS * 1000:
+                if (
+                    self._is_speaking
+                    and self._phrase_duration_ms
+                    > config.VAD_MAX_PHRASE_SECONDS * 1000
+                ):
                     full_phrase_audio = np.concatenate(self._phrase_buffer)
                     phrases.append(
                         SpeechPhrase(
@@ -257,7 +271,7 @@ class SileroVAD:
             self._silence_duration_ms = 0
             self._is_speaking = False
             return phrase
-        
+
         self._phrase_buffer = []
         self._phrase_duration_ms = 0
         self._silence_duration_ms = 0

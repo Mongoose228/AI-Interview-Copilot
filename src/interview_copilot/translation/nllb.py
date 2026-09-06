@@ -32,7 +32,10 @@ class NLLBTranslator(Translator):
         except Exception as e:
             logger.error(f"Failed to initialize NLLB: {e}")
         if not self._ready:
-            logger.warning("NLLBTranslator initialized but dependencies are missing. It will not work.")
+            logger.warning(
+                "NLLBTranslator initialized but dependencies are missing."
+                " It will not work."
+            )
 
     @property
     def is_available(self) -> bool:

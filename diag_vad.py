@@ -29,7 +29,7 @@ for i in range(5):
     out, h, c = sess.run(None, {'input': silence, 'h': h, 'c': c, 'sr': sr})
     print(f"  Chunk {i}: Prob: {out[0][0]:.6f}")
 
-# Test with noise 
+# Test with noise
 print("\n=== TEST: Random noise ===")
 h = np.zeros((2, 1, 64), dtype=np.float32)
 c = np.zeros((2, 1, 64), dtype=np.float32)

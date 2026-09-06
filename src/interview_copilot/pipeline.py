@@ -24,7 +24,10 @@ _AUDIO_RETRY_BASE_DELAY = 1.0  # seconds
 class InterviewPipeline:
     def __init__(self):
         if config.AUDIO_BACKEND != "soundcard":
-            raise NotImplementedError(f"Audio backend '{config.AUDIO_BACKEND}' is not implemented. Use 'soundcard'.")
+            raise NotImplementedError(
+                f"Audio backend '{config.AUDIO_BACKEND}' is not implemented."
+                " Use 'soundcard'."
+            )
         self.audio = SoundCardWASAPIBackend()
         self.vad = SileroVAD()
         if not self.vad.is_available:
@@ -43,12 +46,6 @@ class InterviewPipeline:
                     "NLLB translator failed to initialize. "
                     "Install with: pip install -e '.[nllb]'"
                 )
-                # Notify GUI if callback is available
-                if getattr(self, '_error_callback', None):
-                    self._error_callback(
-                        "NLLB translation unavailable. "
-                        "Install: pip install -e '.[nllb]'"
-                    )
         elif config.TRANSLATION_BACKEND == "deepl":
             self.translator = DeepLTranslator()
 
@@ -72,7 +69,14 @@ class InterviewPipeline:
         # History (bounded)
         self.transcript_history: list[Transcript] = []
 
-    def set_callbacks(self, transcript_callback, suggestion_callback, token_callback, error_callback, audio_status_callback):
+    def set_callbacks(
+        self,
+        transcript_callback,
+        suggestion_callback,
+        token_callback,
+        error_callback,
+        audio_status_callback,
+    ):
         self._transcript_callback = transcript_callback
         self._suggestion_callback = suggestion_callback
         self._token_callback = token_callback
@@ -85,7 +89,8 @@ class InterviewPipeline:
             logger.error("VAD unavailable, capture thread cannot produce results.")
             if self._error_callback:
                 self._error_callback(
-                    "⚠️ VAD model failed to load. Speech detection is disabled. Check logs for details."
+                    "⚠️ VAD model failed to load. "
+                    "Speech detection is disabled. Check logs for details."
                 )
             return
         retries = 0
@@ -163,19 +168,38 @@ class InterviewPipeline:
                     self._error_callback(f"Transcription error: {e}")
         logger.info("STT thread stopped.")
 
-    async def _process_transcript(self, transcript: Transcript, active_profile, history_snapshot: list[Transcript]):
+    async def _process_transcript(
+        self,
+        transcript: Transcript,
+        active_profile,
+        history_snapshot: list[Transcript],
+    ):
         """Process a single transcript: translate + get suggestion concurrently."""
         translation_coro = None
         suggestion_coro = None
-        
+
         # In our refactor, we just store duration_s to avoid modifying the whole pipeline right now
-        timings = [StageTiming(stage_name="STT", started_at=0.0, ended_at=transcript.stt_duration_s, duration_s=transcript.stt_duration_s)]
+        timings = [
+            StageTiming(
+                stage_name="STT",
+                started_at=0.0,
+                ended_at=transcript.stt_duration_s,
+                duration_s=transcript.stt_duration_s,
+            )
+        ]
 
         async def timed_translate():
             start_t = time.time()
             res = await asyncio.to_thread(self.translator.translate, transcript.text_en)
             duration = time.time() - start_t
-            timings.append(StageTiming(stage_name="Translation", started_at=start_t, ended_at=time.time(), duration_s=duration))
+            timings.append(
+                StageTiming(
+                    stage_name="Translation",
+                    started_at=start_t,
+                    ended_at=time.time(),
+                    duration_s=duration,
+                )
+            )
             return res
 
         async def timed_suggestion():
@@ -184,7 +208,14 @@ class InterviewPipeline:
                 history_snapshot, active_profile, stream_callback=stream_cb
             )
             duration = time.time() - start_t
-            timings.append(StageTiming(stage_name="AI_Suggestion", started_at=start_t, ended_at=time.time(), duration_s=duration))
+            timings.append(
+                StageTiming(
+                    stage_name="AI_Suggestion",
+                    started_at=start_t,
+                    ended_at=time.time(),
+                    duration_s=duration,
+                )
+            )
             return res
 
         if self.translator:
@@ -448,10 +479,10 @@ class InterviewPipeline:
 
     def stop(self):
         self._stop_event.set()
-        
+
         # Audio backend will be stopped by the capture thread's finally block
         # Wait for threads to exit
         for t in self._threads:
             t.join(timeout=2.0)
-            
+
         self.vad.reset()  # Reset VAD state on stop

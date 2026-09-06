@@ -32,11 +32,13 @@ class WhisperEngine:
             self._compute_type = "float16" if self._device == "cuda" else "int8"
 
         logger.info(
-            f"Initializing WhisperModel '{self._model_size}' on {self._device} ({self._compute_type})"
+            f"Initializing WhisperModel '{self._model_size}'"
+            f" on {self._device} ({self._compute_type})"
         )
         print(f"Downloading/Loading Whisper model '{self._model_size}', please wait...")
 
-        # Load model. If it's not present, faster-whisper will download it automatically to the cache.
+        # Load model. If it's not present, faster-whisper will download it
+        # automatically to the cache.
         self._model = WhisperModel(
             self._model_size,
             device=self._device,
@@ -47,7 +49,8 @@ class WhisperEngine:
         print("Whisper model loaded successfully.")
 
         # Semaphore to ensure only 1 transcription at a time
-        # (Though ThreadPoolExecutor handles it, it's good practice inside the engine if called from outside)
+        # (Though ThreadPoolExecutor handles it, it's good practice
+        # inside the engine if called from outside)
         self._lock = threading.Lock()
 
         # Warmup
@@ -60,9 +63,9 @@ class WhisperEngine:
         with self._lock:
             try:
                 segments, _ = self._model.transcribe(
-                    dummy_audio, 
-                    beam_size=config.WHISPER_BEAM_SIZE, 
-                    language="en", 
+                    dummy_audio,
+                    beam_size=config.WHISPER_BEAM_SIZE,
+                    language="en",
                     condition_on_previous_text=False,
                     temperature=0.0,
                     without_timestamps=True
@@ -103,7 +106,11 @@ class WhisperEngine:
 
                 # 1. Filter by metrics
                 if avg_logprob < -1.0 or max_no_speech > 0.6:
-                    logger.debug(f"Dropped hallucination by metrics: logprob={avg_logprob:.2f}, no_speech={max_no_speech:.2f}")
+                    logger.debug(
+                        f"Dropped hallucination by metrics:"
+                        f" logprob={avg_logprob:.2f},"
+                        f" no_speech={max_no_speech:.2f}"
+                    )
                     return Transcript(phrase.id, "", "en", 0.0, stt_duration)
 
                 texts = [s.text.strip() for s in segments]
@@ -112,15 +119,16 @@ class WhisperEngine:
                 # 2. Filter by blacklist
                 text_lower = full_text.lower()
                 blacklist = {
-                    "thank you.", "thanks for watching!", "bye.", "you.", "...", 
-                    "okay.", "so.", "thank you", "thanks for watching", "bye", 
+                    "thank you.", "thanks for watching!", "bye.", "you.", "...",
+                    "okay.", "so.", "thank you", "thanks for watching", "bye",
                     "you", "okay", "so"
                 }
                 if text_lower in blacklist or not text_lower:
                     logger.debug(f"Dropped hallucination by blacklist: '{full_text}'")
                     return Transcript(phrase.id, "", "en", 0.0, stt_duration)
 
-                # Use exp(avg_logprob) as a more meaningful confidence metric than language_probability
+                # Use exp(avg_logprob) as a more meaningful confidence metric
+                # than language_probability
                 confidence = math.exp(avg_logprob)
 
                 return Transcript(

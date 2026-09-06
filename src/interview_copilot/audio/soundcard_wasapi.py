@@ -5,12 +5,12 @@ import warnings
 import numpy as np
 import soundcard as sc
 
-# Suppress harmless WASAPI discontinuity warnings
-warnings.filterwarnings("ignore", message="data discontinuity in recording", module="soundcard")
-
 from ..config import config
 from ..models import AudioChunk
 from .base import AudioCaptureBackend
+
+# Suppress harmless WASAPI discontinuity warnings
+warnings.filterwarnings("ignore", message="data discontinuity in recording", module="soundcard")
 
 
 class SoundCardWASAPIBackend(AudioCaptureBackend):
@@ -84,8 +84,6 @@ class SoundCardWASAPIBackend(AudioCaptureBackend):
         )
         self._recorder.__enter__()
         self._running = True
-        
-        self._chunk_frames = int(self._sample_rate * (config.AUDIO_CHUNK_MS / 1000.0))
 
     def read_chunk(self) -> AudioChunk:
         if not self._running or not self._recorder:

@@ -87,7 +87,7 @@ def start_gui(device_id: str | None = None):
 
             def on_token(phrase_id, token):
                 signals.suggestion_token.emit(phrase_id, token)
-            
+
             def on_error(msg):
                 signals.error_occurred.emit(msg)
 

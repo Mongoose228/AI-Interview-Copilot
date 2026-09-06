@@ -1,5 +1,4 @@
 """Tests for the debounce/accumulator logic."""
-import asyncio
 import uuid
 
 import pytest

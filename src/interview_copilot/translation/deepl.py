@@ -20,6 +20,11 @@ class DeepLTranslator(Translator):
                 logger.error(f"Failed to initialize DeepL: {e}")
                 self._translator = None
 
+    @property
+    def is_available(self) -> bool:
+        """Return True if the DeepL translator initialized successfully."""
+        return self._translator is not None
+
     def translate(self, text: str, source_lang: str = "EN", target_lang: str = "RU") -> str | None:
         if not self._translator or not text:
             return None

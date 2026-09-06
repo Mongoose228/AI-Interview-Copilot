@@ -1,8 +1,8 @@
 import re
 
 _FILLER_BLACKLIST = {
-    "uh", "uh-huh", "uh huh", "um", "hmm", "mm", "mm-hmm", "mm hmm", "yeah", "yep", "yup", 
-    "yes", "no", "nope", "nah", "okay", "ok", "right", "sure", "alright", 
+    "uh", "uh-huh", "uh huh", "um", "hmm", "mm", "mm-hmm", "mm hmm", "yeah", "yep", "yup",
+    "yes", "no", "nope", "nah", "okay", "ok", "right", "sure", "alright",
     "i see", "got it", "makes sense", "exactly", "ah", "oh", "wow", "interesting", "cool",
     "so", "well", "like", "you know"
 }
@@ -15,9 +15,9 @@ def is_filler(text: str) -> bool:
     clean_text = re.sub(r'[^\w\s]', '', text.lower()).strip()
     if not clean_text:
         return True
-    
+
     words = clean_text.split()
     if len(words) > 3:
         return False
-        
+
     return clean_text in _FILLER_BLACKLIST

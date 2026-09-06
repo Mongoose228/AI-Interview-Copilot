@@ -9,8 +9,8 @@ from ..models import ProfileSnapshot, SuggestionResult, Transcript
 from .sanitize import sanitize_for_prompt
 
 _HEDGING_TERMS = {
-    "i'm not sure", "i am not sure", "i think", "might be", "could be", 
-    "maybe", "perhaps", "verify", "double check", "double-check", 
+    "i'm not sure", "i am not sure", "i think", "might be", "could be",
+    "maybe", "perhaps", "verify", "double check", "double-check",
     "not 100%", "not entirely sure", "it's possible"
 }
 
@@ -62,18 +62,21 @@ class OpenRouterSuggester:
     def _build_system_prompt(self, profile: ProfileSnapshot) -> str:
         safe_content = sanitize_for_prompt(profile.content)
         prompt = (
-            "You are an AI Interview Copilot assisting a candidate during a technical interview.\n"
-            "Below is the candidate's profile. Use this to provide relevant and personalized answers.\n\n"
+            "You are an AI Interview Copilot assisting a candidate"
+            " during a technical interview.\n"
+            "Below is the candidate's profile. Use this to provide"
+            " relevant and personalized answers.\n\n"
             f"--- CANDIDATE PROFILE ---\n{safe_content}\n-------------------------\n\n"
-            "Your task is to provide a brief, professional, and accurate response to the interviewer's question.\n"
+            "Your task is to provide a brief, professional, and accurate"
+            " response to the interviewer's question.\n"
             "Output your answer as plain text in English only.\n"
             "Do NOT use markdown formatting, markdown blocks, or JSON."
         )
         return prompt
 
     async def get_suggestion(
-        self, 
-        transcript_history: list[Transcript], 
+        self,
+        transcript_history: list[Transcript],
         profile: ProfileSnapshot,
         stream_callback: Callable[[str], Awaitable[None]] | None = None
     ) -> SuggestionResult | None:
@@ -85,7 +88,7 @@ class OpenRouterSuggester:
             return None
 
         recent_transcripts = transcript_history[-5:]  # Last 5 phrases
-        
+
         context_lines = []
         for i, t in enumerate(recent_transcripts):
             safe_text = sanitize_for_prompt(t.text_en)
@@ -96,7 +99,7 @@ class OpenRouterSuggester:
                 context_lines.append(f'Current question ({label}): "{safe_text}"')
             else:
                 context_lines.append(f'- {label}: "{safe_text}"')
-        
+
         context = "\n".join(context_lines)
 
         if not context.strip():
@@ -110,11 +113,11 @@ class OpenRouterSuggester:
                 model=self._model,
                 messages=[
                     {
-                        "role": "system", 
+                        "role": "system",
                         "content": [
                             {
-                                "type": "text", 
-                                "text": system_prompt, 
+                                "type": "text",
+                                "text": system_prompt,
                                 "cache_control": {"type": "ephemeral"}
                             }
                         ]

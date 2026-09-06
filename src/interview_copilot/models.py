@@ -46,8 +46,6 @@ class StageTiming:
     duration_s: float
 
 
-
-
 @dataclass(frozen=True)
 class ProfileSnapshot:
     name: str
