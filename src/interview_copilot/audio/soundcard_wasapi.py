@@ -1,3 +1,4 @@
+import threading
 import time
 import uuid
 import warnings
@@ -18,9 +19,8 @@ class SoundCardWASAPIBackend(AudioCaptureBackend):
         self._mic = None
         self._recorder = None
         self._running = False
+        self._lock = threading.Lock()
         self._sample_rate = config.AUDIO_SAMPLE_RATE
-        # Windows WASAPI shared mode supports automatic resampling.
-        # We request our target rate (16000Hz) directly.
         self._chunk_frames = int(self._sample_rate * (config.AUDIO_CHUNK_MS / 1000.0))
 
     def list_devices(self) -> list[dict]:
@@ -30,7 +30,6 @@ class SoundCardWASAPIBackend(AudioCaptureBackend):
         devices = []
         for i, m in enumerate(mics):
             is_loopback = m.isloopback
-            # heuristic to find the loopback of default speaker
             is_default_loopback = is_loopback and (
                 default_speaker.id in m.id
                 or m.name in default_speaker.name
@@ -49,70 +48,79 @@ class SoundCardWASAPIBackend(AudioCaptureBackend):
 
     def get_default_loopback(self) -> dict | None:
         devices = self.list_devices()
-        # first try to find the one marked as default
         for d in devices:
             if d.get("is_default") and d.get("is_loopback"):
                 return d
-        # if not found, just return first loopback
         for d in devices:
             if d.get("is_loopback"):
                 return d
         return None
 
     def start(self, device_id: str | None = None) -> None:
-        if self._running:
-            return
+        with self._lock:
+            if self._running:
+                return
 
-        mics = sc.all_microphones(include_loopback=True)
-        if device_id:
-            for m in mics:
-                if str(m.id) == device_id:
-                    self._mic = m
-                    if not m.isloopback:
-                        from ..logging_config import logger
-                        logger.warning(
-                            f"Selected device '{m.name}' is NOT a loopback device. "
-                            f"Audio will be captured from the microphone, not system output."
-                        )
-                    break
-            if not self._mic:
-                raise ValueError(f"Device {device_id} not found.")
-        else:
-            default_info = self.get_default_loopback()
-            if not default_info:
-                raise RuntimeError("No loopback device found.")
-            self._mic = mics[default_info["index"]]
+            mics = sc.all_microphones(include_loopback=True)
+            if device_id:
+                for m in mics:
+                    if str(m.id) == device_id:
+                        self._mic = m
+                        if not m.isloopback:
+                            from ..logging_config import logger
+                            logger.warning(
+                                f"Selected device '{m.name}' is NOT a loopback device. "
+                                f"Audio will be captured from the microphone, not system output."
+                            )
+                        break
+                if not self._mic:
+                    raise ValueError(f"Device {device_id} not found.")
+            else:
+                default_info = self.get_default_loopback()
+                if not default_info:
+                    raise RuntimeError("No loopback device found.")
+                self._mic = mics[default_info["index"]]
 
-        # soundcard requires samplerate to be passed explicitly (no default/dynamic native rate)
-        # WASAPI handles the resampling if the requested rate doesn't match the native rate.
-        self._recorder = self._mic.recorder(
-            samplerate=self._sample_rate, channels=2, blocksize=self._chunk_frames
-        )
-        self._recorder.__enter__()
-        self._running = True
+            self._recorder = self._mic.recorder(
+                samplerate=self._sample_rate, channels=2, blocksize=self._chunk_frames
+            )
+            self._recorder.__enter__()
+            self._running = True
 
     def read_chunk(self) -> AudioChunk:
-        if not self._running or not self._recorder:
-            raise RuntimeError("Capture not started")
+        with self._lock:
+            if not self._running or not self._recorder:
+                raise RuntimeError("Capture not started")
+            recorder = self._recorder
+            sample_rate = self._sample_rate
+            chunk_frames = self._chunk_frames
 
-        # blocks until chunk_frames are available
-        data = self._recorder.record(numframes=self._chunk_frames)
-        # data is (frames, channels) float32 — pass as ndarray directly
+        # record() blocks; do not hold the lock so stop() can interrupt
+        try:
+            data = recorder.record(numframes=chunk_frames)
+        except Exception:
+            if not self._running:
+                raise RuntimeError("Capture stopped") from None
+            raise
 
         return AudioChunk(
             id=uuid.uuid4(),
             data=data.astype(np.float32),
-            sample_rate=self._sample_rate,
+            sample_rate=sample_rate,
             channels=2,
             captured_at=time.time(),
         )
 
     def stop(self) -> None:
-        if self._running and self._recorder:
-            self._recorder.__exit__(None, None, None)
-        self._recorder = None
-        self._mic = None
-        self._running = False
+        with self._lock:
+            if self._running and self._recorder:
+                try:
+                    self._recorder.__exit__(None, None, None)
+                except Exception:
+                    pass
+            self._recorder = None
+            self._mic = None
+            self._running = False
 
     def is_running(self) -> bool:
         return self._running

@@ -1,7 +1,18 @@
 import uuid
 from dataclasses import dataclass, field
+from enum import Enum
 
 import numpy as np
+
+
+class SuggestionStatus(str, Enum):
+    OK = "ok"
+    SKIPPED_NO_PROFILE = "skipped_no_profile"
+    SKIPPED_NO_KEY = "skipped_no_key"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    INTERRUPTED = "interrupted"
+    PENDING = "pending"
 
 
 @dataclass(frozen=True)
@@ -29,13 +40,15 @@ class Transcript:
     language: str
     confidence: float
     stt_duration_s: float
-    speaker: str = "interviewer"  # "interviewer" | "candidate"
+    speaker: str = "interviewer"  # reserved for future diarization
+    stt_started_at: float = 0.0
+    stt_ended_at: float = 0.0
 
 
 @dataclass(frozen=True)
 class SuggestionResult:
     answer_en: str
-    has_hedging: bool = False  # True if LLM used uncertain language
+    has_hedging: bool = False
 
 
 @dataclass(frozen=True)
@@ -51,7 +64,6 @@ class ProfileSnapshot:
     name: str
     content_hash: str
     content: str
-    version: int
     loaded_at: float
 
 
@@ -66,3 +78,4 @@ class PipelineResult:
     created_at: float = 0.0
     is_cancelled: bool = False
     answer_ru: str | None = None
+    suggestion_status: SuggestionStatus = SuggestionStatus.PENDING

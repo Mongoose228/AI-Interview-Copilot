@@ -3,7 +3,15 @@ from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-_ROOT_DIR = Path(__file__).resolve().parent.parent.parent
+from .paths import ensure_example_profile, find_env_file, get_context_dir, get_data_dir
+
+
+def _default_context_dir() -> str:
+    ensure_example_profile()
+    return str(get_context_dir())
+
+
+_env_file = find_env_file()
 
 
 class Settings(BaseSettings):
@@ -27,7 +35,6 @@ class Settings(BaseSettings):
     AUDIO_DEVICE: str | None = None
     AUDIO_SAMPLE_RATE: int = 16000
     AUDIO_CHUNK_MS: int = 30
-    AUDIO_BACKEND: str = "soundcard"
 
     # VAD Settings
     VAD_THRESHOLD: float = 0.5
@@ -37,7 +44,6 @@ class Settings(BaseSettings):
     VAD_MAX_PHRASE_SECONDS: int = 12
 
     # Debounce: seconds of silence after last transcript before sending to LLM.
-    # Higher values = better question merging, but higher latency.
     LLM_DEBOUNCE_DELAY_S: float = 1.2
 
     # Translation Settings
@@ -45,12 +51,23 @@ class Settings(BaseSettings):
     NLLB_MODEL: str = "facebook/nllb-200-distilled-600M"
 
     # Application Settings
-    CONTEXT_DIR: str = str(_ROOT_DIR / "context")
+    CONTEXT_DIR: str = ""
     LOG_OBFUSCATION_ENABLED: bool = True
-    TEXT_LOGGING_ENABLED: bool = False
     LOG_LEVEL: str = "INFO"
 
-    model_config = SettingsConfigDict(env_file=str(_ROOT_DIR / ".env"), env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(
+        env_file=str(_env_file) if _env_file else None,
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    def model_post_init(self, __context) -> None:
+        if not self.CONTEXT_DIR:
+            object.__setattr__(self, "CONTEXT_DIR", _default_context_dir())
+        else:
+            Path(self.CONTEXT_DIR).mkdir(parents=True, exist_ok=True)
+            ensure_example_profile(Path(self.CONTEXT_DIR))
+        get_data_dir()  # ensure exists
 
 
 config = Settings()

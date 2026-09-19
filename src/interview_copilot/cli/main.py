@@ -4,10 +4,10 @@ import sys
 import numpy as np
 
 from interview_copilot.audio.soundcard_wasapi import SoundCardWASAPIBackend
+from interview_copilot.config import config
 from interview_copilot.pipeline import InterviewPipeline
 from interview_copilot.stt.whisper_engine import WhisperEngine
 from interview_copilot.vad.silero import SileroVAD
-from interview_copilot.config import config
 
 
 def cmd_devices(args):
@@ -155,6 +155,38 @@ def cmd_start(args):
         sys.exit(1)
 
 
+def cmd_profiles(args):
+    """List available candidate profiles."""
+    from interview_copilot.suggestion.profile_manager import ProfileManager
+
+    mgr = ProfileManager()
+    profiles = mgr.list_profiles()
+    if not profiles:
+        print("No profiles found. Add a .md file to the context directory.")
+        print(f"Context dir: {mgr._context_dir}")
+        return
+    active = None
+    snap = mgr.load_active_profile()
+    if snap:
+        active = snap.name
+    print(f"Context dir: {mgr._context_dir}")
+    for name in profiles:
+        marker = " (active)" if name == active else ""
+        print(f"  - {name}{marker}")
+
+
+def cmd_profile_set(args):
+    """Set the active candidate profile."""
+    from interview_copilot.suggestion.profile_manager import ProfileManager
+
+    mgr = ProfileManager()
+    snap = mgr.load_profile(args.name)
+    if not snap:
+        print(f"Profile '{args.name}' not found.")
+        sys.exit(1)
+    print(f"Active profile set to: {snap.name}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Interview Copilot CLI")
     subparsers = parser.add_subparsers(dest="command", help="Available commands", required=True)
@@ -191,6 +223,14 @@ def main():
     parser_start = subparsers.add_parser("start", help="Start the AI Interview Copilot GUI")
     parser_start.add_argument("--device", type=str, help="Device ID to use (default: auto)")
     parser_start.set_defaults(func=cmd_start)
+
+    # profiles
+    parser_profiles = subparsers.add_parser("profiles", help="List candidate profiles")
+    parser_profiles.set_defaults(func=cmd_profiles)
+
+    parser_profile_set = subparsers.add_parser("profile-set", help="Set active candidate profile")
+    parser_profile_set.add_argument("name", type=str, help="Profile name (without .md)")
+    parser_profile_set.set_defaults(func=cmd_profile_set)
 
     args = parser.parse_args()
     args.func(args)

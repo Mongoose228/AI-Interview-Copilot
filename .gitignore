@@ -25,6 +25,10 @@ venv.bak/
 # App state
 .copilot_state.json
 
+# Candidate resumes (keep only the example)
+context/*.md
+!context/example_profile.md
+
 # IDEs & OS
 .vscode/
 .idea/

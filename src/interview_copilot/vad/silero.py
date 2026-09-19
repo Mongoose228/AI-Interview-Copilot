@@ -1,17 +1,17 @@
-import time
-import urllib.request
-import urllib.error
-import uuid
-import shutil
 import hashlib
+import shutil
+import time
+import urllib.error
+import urllib.request
+import uuid
 from collections import deque
-from pathlib import Path
 
 import numpy as np
 
 from ..config import config
 from ..logging_config import logger
 from ..models import AudioChunk, SpeechPhrase
+from ..paths import get_models_dir
 
 # Expected sha256 of silero_vad.onnx (v4.0)
 _ONNX_SHA256 = "5605d3c01c0cf07ed9f30325fddb73248c8b4aebda3ec39cb16eebc89d280eec"
@@ -33,8 +33,8 @@ class SileroVAD:
         try:
             import onnxruntime as ort
 
-            # Download ONNX if missing
-            model_path = Path(config.CONTEXT_DIR) / "silero_vad.onnx"
+            # Download ONNX if missing (into data-dir/models, not context/)
+            model_path = get_models_dir() / "silero_vad.onnx"
             if not model_path.exists():
                 logger.info(f"Downloading Silero VAD model to {model_path}...")
                 model_path.parent.mkdir(parents=True, exist_ok=True)

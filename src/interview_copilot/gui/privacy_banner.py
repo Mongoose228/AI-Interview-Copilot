@@ -1,7 +1,6 @@
 """Privacy notice banner shown on first launch."""
 
 import json
-import os
 
 from PySide6.QtWidgets import (
     QFrame,
@@ -12,18 +11,14 @@ from PySide6.QtWidgets import (
 )
 
 from ..logging_config import logger
+from ..paths import get_privacy_state_path
 
 _STATE_KEY = "privacy_accepted"
 
 
-def _get_state_path() -> str:
-    appdata = os.environ.get("APPDATA", ".")
-    return os.path.join(appdata, "interview_copilot", ".privacy_state.json")
-
-
 def _is_accepted() -> bool:
-    path = _get_state_path()
-    if os.path.exists(path):
+    path = get_privacy_state_path()
+    if path.exists():
         try:
             with open(path, "r", encoding="utf-8") as f:
                 state = json.load(f)
@@ -34,8 +29,8 @@ def _is_accepted() -> bool:
 
 
 def _save_accepted():
-    path = _get_state_path()
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    path = get_privacy_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump({_STATE_KEY: True}, f)
@@ -49,7 +44,6 @@ class PrivacyBanner(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
 
-        # Don't show if already accepted
         if _is_accepted():
             self.setVisible(False)
             return

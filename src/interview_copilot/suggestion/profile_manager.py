@@ -6,20 +6,14 @@ import time
 from ..config import config
 from ..logging_config import logger
 from ..models import ProfileSnapshot
+from ..paths import get_profile_state_path
 
 
 class ProfileManager:
-    def __init__(self):
-        self._context_dir = config.CONTEXT_DIR
+    def __init__(self, context_dir: str | None = None, state_file: str | None = None):
+        self._context_dir = context_dir or config.CONTEXT_DIR
+        self._state_file = state_file or str(get_profile_state_path())
 
-        # Store state in %APPDATA% (or fallback to CWD) to avoid CWD dependency
-        appdata = os.environ.get("APPDATA", ".")
-        state_dir = os.path.join(appdata, "interview_copilot")
-        if not os.path.exists(state_dir):
-            os.makedirs(state_dir, exist_ok=True)
-        self._state_file = os.path.join(state_dir, ".copilot_state.json")
-
-        # Ensure context dir exists
         if not os.path.exists(self._context_dir):
             os.makedirs(self._context_dir)
 
@@ -31,15 +25,14 @@ class ProfileManager:
         profiles = []
         for filename in os.listdir(self._context_dir):
             if filename.endswith(".md"):
-                profiles.append(filename[:-3])  # Strip .md
-        return profiles
+                profiles.append(filename[:-3])
+        return sorted(profiles)
 
     def _get_hash(self, content: str) -> str:
         return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
     def load_profile(self, name: str) -> ProfileSnapshot | None:
         """Load a profile from disk and return a snapshot."""
-        # Validate name: no path separators or traversal
         if not name or ".." in name or "/" in name or "\\" in name or os.sep in name:
             logger.error(f"Invalid profile name (path traversal attempt): {name}")
             return None
@@ -63,11 +56,9 @@ class ProfileManager:
                 name=name,
                 content=content,
                 content_hash=self._get_hash(content),
-                version=1,
                 loaded_at=time.time(),
             )
 
-            # Save to state file
             self._save_state(name)
             return snapshot
         except (RuntimeError, ValueError, TypeError, OSError) as e:
@@ -98,7 +89,6 @@ class ProfileManager:
             if snapshot:
                 return snapshot
 
-        # Fallback to first available (excluding example_profile)
         profiles = self.list_profiles()
         if profiles:
             real_profiles = [p for p in profiles if p != "example_profile"]
@@ -108,12 +98,11 @@ class ProfileManager:
                     f"Falling back to {real_profiles[0]}"
                 )
                 return self.load_profile(real_profiles[0])
-            else:
-                logger.warning(
-                    "Only example_profile found. Skipping auto-load. "
-                    "Create your own profile in the context/ directory."
-                )
-                return None
+            logger.warning(
+                "Only example_profile found. Skipping auto-load. "
+                "Create your own profile in the context/ directory."
+            )
+            return None
 
         logger.warning("No profiles found. Suggestions will be disabled.")
         return None

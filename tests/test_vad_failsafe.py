@@ -4,9 +4,11 @@ from unittest.mock import MagicMock
 from interview_copilot.vad.silero import SileroVAD
 
 
-def test_vad_unavailable_property(mocker):
+def test_vad_unavailable_property(mocker, tmp_path):
     """When ONNX loading fails, is_available should be False."""
-    mocker.patch("interview_copilot.vad.silero.Path.exists", return_value=False)
+    models = tmp_path / "models"
+    models.mkdir()
+    mocker.patch("interview_copilot.vad.silero.get_models_dir", return_value=models)
     mocker.patch(
         "interview_copilot.vad.silero.urllib.request.urlopen",
         side_effect=OSError("network error"),
@@ -15,9 +17,12 @@ def test_vad_unavailable_property(mocker):
     assert not vad.is_available
 
 
-def test_vad_available_when_loaded(mocker):
+def test_vad_available_when_loaded(mocker, tmp_path):
     """When ONNX loads successfully, is_available should be True."""
-    mocker.patch("interview_copilot.vad.silero.Path.exists", return_value=True)
+    models = tmp_path / "models"
+    models.mkdir()
+    (models / "silero_vad.onnx").write_bytes(b"fake")
+    mocker.patch("interview_copilot.vad.silero.get_models_dir", return_value=models)
     mock_session = MagicMock()
     mock_session.get_inputs.return_value = [
         MagicMock(name="input"),
@@ -25,8 +30,9 @@ def test_vad_available_when_loaded(mocker):
         MagicMock(name="c"),
         MagicMock(name="sr"),
     ]
-    # Set .name attribute on each mock input
-    for inp, n in zip(mock_session.get_inputs.return_value, ["input", "h", "c", "sr"]):
+    for inp, n in zip(
+        mock_session.get_inputs.return_value, ["input", "h", "c", "sr"], strict=True
+    ):
         inp.name = n
     mocker.patch("onnxruntime.InferenceSession", return_value=mock_session)
     vad = SileroVAD()

@@ -1,6 +1,6 @@
+import math
 import threading
 import time
-import math
 
 import numpy as np
 from faster_whisper import WhisperModel
@@ -35,7 +35,7 @@ class WhisperEngine:
             f"Initializing WhisperModel '{self._model_size}'"
             f" on {self._device} ({self._compute_type})"
         )
-        print(f"Downloading/Loading Whisper model '{self._model_size}', please wait...")
+        logger.info(f"Downloading/Loading Whisper model '{self._model_size}', please wait...")
 
         # Load model. If it's not present, faster-whisper will download it
         # automatically to the cache.
@@ -46,7 +46,7 @@ class WhisperEngine:
             local_files_only=False,  # Allows auto-download
             cpu_threads=config.WHISPER_CPU_THREADS,
         )
-        print("Whisper model loaded successfully.")
+        logger.info("Whisper model loaded successfully.")
 
         # Semaphore to ensure only 1 transcription at a time
         # (Though ThreadPoolExecutor handles it, it's good practice
@@ -99,7 +99,10 @@ class WhisperEngine:
                 stt_duration = time.time() - start_time
 
                 if not segments:
-                    return Transcript(phrase.id, "", "en", 0.0, stt_duration)
+                    return Transcript(
+                        phrase.id, "", "en", 0.0, stt_duration,
+                        stt_started_at=start_time, stt_ended_at=time.time(),
+                    )
 
                 avg_logprob = sum(s.avg_logprob for s in segments) / len(segments)
                 max_no_speech = max(s.no_speech_prob for s in segments)
@@ -111,7 +114,10 @@ class WhisperEngine:
                         f" logprob={avg_logprob:.2f},"
                         f" no_speech={max_no_speech:.2f}"
                     )
-                    return Transcript(phrase.id, "", "en", 0.0, stt_duration)
+                    return Transcript(
+                        phrase.id, "", "en", 0.0, stt_duration,
+                        stt_started_at=start_time, stt_ended_at=time.time(),
+                    )
 
                 texts = [s.text.strip() for s in segments]
                 full_text = " ".join(texts).strip()
@@ -125,11 +131,15 @@ class WhisperEngine:
                 }
                 if text_lower in blacklist or not text_lower:
                     logger.debug(f"Dropped hallucination by blacklist: '{full_text}'")
-                    return Transcript(phrase.id, "", "en", 0.0, stt_duration)
+                    return Transcript(
+                        phrase.id, "", "en", 0.0, stt_duration,
+                        stt_started_at=start_time, stt_ended_at=time.time(),
+                    )
 
                 # Use exp(avg_logprob) as a more meaningful confidence metric
                 # than language_probability
                 confidence = math.exp(avg_logprob)
+                ended = time.time()
 
                 return Transcript(
                     phrase_id=phrase.id,
@@ -137,6 +147,8 @@ class WhisperEngine:
                     language=info.language,
                     confidence=confidence,
                     stt_duration_s=stt_duration,
+                    stt_started_at=start_time,
+                    stt_ended_at=ended,
                 )
             except (RuntimeError, ValueError, TypeError, OSError) as e:
                 logger.error(f"Whisper transcription failed: {e}")
@@ -147,4 +159,6 @@ class WhisperEngine:
                     language="en",
                     confidence=0.0,
                     stt_duration_s=stt_duration,
+                    stt_started_at=start_time,
+                    stt_ended_at=time.time(),
                 )

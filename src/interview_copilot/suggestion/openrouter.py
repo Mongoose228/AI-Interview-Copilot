@@ -1,3 +1,4 @@
+import re
 from collections.abc import Awaitable, Callable
 
 import httpx
@@ -8,16 +9,28 @@ from ..logging_config import logger
 from ..models import ProfileSnapshot, SuggestionResult, Transcript
 from .sanitize import sanitize_for_prompt
 
-_HEDGING_TERMS = {
-    "i'm not sure", "i am not sure", "i think", "might be", "could be",
-    "maybe", "perhaps", "verify", "double check", "double-check",
-    "not 100%", "not entirely sure", "it's possible"
-}
+# Explicit uncertainty phrases only (word-boundary aware)
+_HEDGING_PATTERNS = [
+    re.compile(p, re.IGNORECASE)
+    for p in [
+        r"\bi'?m not sure\b",
+        r"\bi am not sure\b",
+        r"\bnot entirely sure\b",
+        r"\bnot 100%\b",
+        r"\bi think\b",
+        r"\bmight be\b",
+        r"\bcould be\b",
+        r"\bmaybe\b",
+        r"\bperhaps\b",
+        r"\bdouble[- ]check\b",
+        r"\bit'?s possible\b",
+    ]
+]
+
 
 def _detect_needs_verification(text: str) -> bool:
-    lower_text = text.lower()
-    for term in _HEDGING_TERMS:
-        if term in lower_text:
+    for pattern in _HEDGING_PATTERNS:
+        if pattern.search(text):
             return True
     return False
 
@@ -48,12 +61,15 @@ class OpenRouterSuggester:
             )
             logger.info(f"OpenRouter Suggester initialized with model {self._model}.")
 
+    @property
+    def is_configured(self) -> bool:
+        return self._client is not None
+
     async def warm_up(self):
         """Pre-warm the TCP+TLS connection to avoid cold-start latency on first real request."""
         if not self._client:
             return
         try:
-            # Lightweight call that establishes the connection pool
             await self._client.models.list()
             logger.info("OpenRouter connection pre-warmed.")
         except Exception as e:
@@ -89,22 +105,20 @@ class OpenRouterSuggester:
         if not self._client:
             return None
 
-        # Build context from the last N transcripts
-        if not transcript_history:
+        if not transcript_history or not profile:
             return None
 
-        recent_transcripts = transcript_history[-5:]  # Last 5 phrases
+        recent_transcripts = transcript_history[-5:]
 
         context_lines = []
         for i, t in enumerate(recent_transcripts):
             safe_text = sanitize_for_prompt(t.text_en)
             if not safe_text:
                 continue
-            label = "Interviewer" if t.speaker == "interviewer" else "Candidate"
             if i == len(recent_transcripts) - 1:
-                context_lines.append(f'Current question ({label}): "{safe_text}"')
+                context_lines.append(f'Current question (Interviewer): "{safe_text}"')
             else:
-                context_lines.append(f'- {label}: "{safe_text}"')
+                context_lines.append(f'- Interviewer: "{safe_text}"')
 
         context = "\n".join(context_lines)
 
@@ -151,14 +165,11 @@ class OpenRouterSuggester:
             if not full_text:
                 return None
 
-            has_hedging = _detect_needs_verification(full_text)
-
             return SuggestionResult(
                 answer_en=full_text,
-                has_hedging=has_hedging
+                has_hedging=_detect_needs_verification(full_text)
             )
 
         except Exception as e:
             logger.error(f"OpenRouter Suggestion failed: {e}")
             return None
-
