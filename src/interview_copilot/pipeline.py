@@ -580,7 +580,7 @@ class InterviewPipeline:
         if result.timings:
             timing_parts = [f"{t.stage_name}={t.duration_s:.2f}s" for t in result.timings]
             total = sum(t.duration_s for t in result.timings)
-            logger.info(f"[Timings] {' → '.join(timing_parts)} | total={total:.2f}s")
+            logger.info(f"[Timings] {' -> '.join(timing_parts)} | total={total:.2f}s")
 
         if config.LOG_OBFUSCATION_ENABLED:
             logger.info(
