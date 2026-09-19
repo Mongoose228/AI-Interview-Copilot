@@ -39,7 +39,18 @@ class ProfileManager:
 
     def load_profile(self, name: str) -> ProfileSnapshot | None:
         """Load a profile from disk and return a snapshot."""
+        # Validate name: no path separators or traversal
+        if not name or ".." in name or "/" in name or "\\" in name or os.sep in name:
+            logger.error(f"Invalid profile name (path traversal attempt): {name}")
+            return None
+
         file_path = os.path.join(self._context_dir, f"{name}.md")
+        resolved = os.path.realpath(file_path)
+        context_resolved = os.path.realpath(self._context_dir)
+        if not resolved.startswith(context_resolved + os.sep):
+            logger.error(f"Profile path escapes context directory: {resolved}")
+            return None
+
         if not os.path.exists(file_path):
             logger.error(f"Profile {name} not found at {file_path}")
             return None
@@ -87,11 +98,22 @@ class ProfileManager:
             if snapshot:
                 return snapshot
 
-        # Fallback to first available
+        # Fallback to first available (excluding example_profile)
         profiles = self.list_profiles()
         if profiles:
-            logger.warning(f"Active profile not found or invalid. Falling back to {profiles[0]}")
-            return self.load_profile(profiles[0])
+            real_profiles = [p for p in profiles if p != "example_profile"]
+            if real_profiles:
+                logger.warning(
+                    f"Active profile not found or invalid. "
+                    f"Falling back to {real_profiles[0]}"
+                )
+                return self.load_profile(real_profiles[0])
+            else:
+                logger.warning(
+                    "Only example_profile found. Skipping auto-load. "
+                    "Create your own profile in the context/ directory."
+                )
+                return None
 
         logger.warning("No profiles found. Suggestions will be disabled.")
         return None

@@ -68,6 +68,12 @@ class SoundCardWASAPIBackend(AudioCaptureBackend):
             for m in mics:
                 if str(m.id) == device_id:
                     self._mic = m
+                    if not m.isloopback:
+                        from ..logging_config import logger
+                        logger.warning(
+                            f"Selected device '{m.name}' is NOT a loopback device. "
+                            f"Audio will be captured from the microphone, not system output."
+                        )
                     break
             if not self._mic:
                 raise ValueError(f"Device {device_id} not found.")

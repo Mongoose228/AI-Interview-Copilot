@@ -109,9 +109,18 @@ class InterviewPipeline:
                     phrases = self.vad.process_chunk(chunk)
                     for p in phrases:
                         try:
-                            self.phrase_queue.put(p, timeout=1.0)
+                            self.phrase_queue.put_nowait(p)
                         except queue.Full:
-                            logger.warning("Phrase queue is full, dropping phrase.")
+                            # Drop oldest to keep fresh phrases (real-time priority)
+                            try:
+                                self.phrase_queue.get_nowait()
+                            except queue.Empty:
+                                pass
+                            try:
+                                self.phrase_queue.put_nowait(p)
+                            except queue.Full:
+                                pass
+                            logger.warning("Phrase queue full, dropped oldest phrase.")
 
             except (RuntimeError, ValueError, TypeError, OSError) as e:
                 if self._stop_event.is_set():
@@ -119,8 +128,8 @@ class InterviewPipeline:
                 logger.error(f"Capture worker error: {e}")
                 try:
                     self.audio.stop()
-                except (RuntimeError, ValueError, TypeError) as e:
-                    logger.warning(f"Error ignored: {e}")
+                except (RuntimeError, ValueError, TypeError) as stop_err:
+                    logger.warning(f"Error ignored: {stop_err}")
 
                 retries += 1
                 if retries > _MAX_AUDIO_RETRIES:
@@ -145,8 +154,8 @@ class InterviewPipeline:
             finally:
                 try:
                     self.audio.stop()
-                except (RuntimeError, ValueError, TypeError) as e:
-                    logger.warning(f"Error ignored: {e}")
+                except (RuntimeError, ValueError, TypeError) as stop_err:
+                    logger.warning(f"Error ignored: {stop_err}")
 
         logger.info("Audio capture thread stopped.")
 
@@ -155,6 +164,8 @@ class InterviewPipeline:
         while not self._stop_event.is_set():
             try:
                 phrase = self.phrase_queue.get(timeout=0.5)
+                if phrase is None:
+                    break  # Sentinel received, exit gracefully
                 vad_to_stt_gap = time.time() - phrase.vad_end_at
                 logger.debug(f"[Timing] VAD→STT gap: {vad_to_stt_gap:.3f}s")
                 transcript = self.stt.transcribe(phrase)
@@ -384,38 +395,47 @@ class InterviewPipeline:
                 )
             except TimeoutError:
                 continue
-
-            # Early exit for filler phrases
-            if is_filler(transcript.text_en):
-                logger.debug(
-                    f"Dropped filler from LLM processing: '{transcript.text_en}'"
-                )
+            except Exception as e:
+                logger.error(f"Orchestrator queue error: {e}")
                 continue
 
-            # Emit early transcript card to GUI immediately
-            if self._transcript_callback:
-                initial_result = PipelineResult(
-                    id=transcript.phrase_id,
-                    transcript=transcript.text_en,
-                    translation_ru=None,
-                    suggestion=None,
-                    profile=active_profile,
-                    created_at=time.time(),
+            try:
+                # Early exit for filler phrases
+                if is_filler(transcript.text_en):
+                    logger.debug(
+                        f"Dropped filler from LLM processing: '{transcript.text_en}'"
+                    )
+                    continue
+
+                # Emit early transcript card to GUI immediately
+                if self._transcript_callback:
+                    initial_result = PipelineResult(
+                        id=transcript.phrase_id,
+                        transcript=transcript.text_en,
+                        translation_ru=None,
+                        suggestion=None,
+                        profile=active_profile,
+                        created_at=time.time(),
+                    )
+                    self._transcript_callback(initial_result)
+
+                # Accumulate transcript segment
+                pending_transcripts.append(transcript)
+
+                # Reset debounce timer: cancel old, start new
+                if debounce_task and not debounce_task.done():
+                    debounce_task.cancel()
+
+                debounce_task = asyncio.create_task(flush_pending())
+                self._background_tasks.add(debounce_task)
+                debounce_task.add_done_callback(
+                    lambda t: self._background_tasks.discard(t)
                 )
-                self._transcript_callback(initial_result)
-
-            # Accumulate transcript segment
-            pending_transcripts.append(transcript)
-
-            # Reset debounce timer: cancel old, start new
-            if debounce_task and not debounce_task.done():
-                debounce_task.cancel()
-
-            debounce_task = asyncio.create_task(flush_pending())
-            self._background_tasks.add(debounce_task)
-            debounce_task.add_done_callback(
-                lambda t: self._background_tasks.discard(t)
-            )
+            except Exception as e:
+                logger.error(f"Orchestrator processing error: {e}")
+                if self._error_callback:
+                    self._error_callback(f"Processing error: {e}")
+                continue  # Keep processing next phrases
 
         # Cleanup: cancel any remaining tasks on shutdown
         for task in list(self._background_tasks):
@@ -424,6 +444,12 @@ class InterviewPipeline:
         logger.info("Async orchestrator stopped.")
 
     def _display_result(self, result: PipelineResult):
+        # Log stage timings for performance analysis (no private data, always log)
+        if result.timings:
+            timing_parts = [f"{t.stage_name}={t.duration_s:.2f}s" for t in result.timings]
+            total = sum(t.duration_s for t in result.timings)
+            logger.info(f"[Timings] {' → '.join(timing_parts)} | total={total:.2f}s")
+
         if config.LOG_OBFUSCATION_ENABLED:
             # In privacy mode, only log metadata
             logger.info(
@@ -431,28 +457,35 @@ class InterviewPipeline:
                 f"has_translation={result.translation_ru is not None} "
                 f"has_suggestion={result.suggestion is not None}"
             )
-        else:
-            print("\n" + "=" * 60)
+            return
+
+        # GUI mode: log sensitive data via log_sensitive(), don't print to stdout
+        if self._suggestion_callback:
             log_sensitive(f"[EN]: {result.transcript}")
-            print(f"🗣️  [EN]: {result.transcript}")
             if result.translation_ru:
                 log_sensitive(f"[RU]: {result.translation_ru}")
-                print(f"🇷🇺  [RU]: {result.translation_ru}")
             if result.suggestion:
-                print("-" * 60)
-                hedging_mark = " ⚠️(uncertain)" if result.suggestion.has_hedging else ""
                 log_sensitive(f"[AI EN]: {result.suggestion.answer_en}")
-                print(f"💡 [AI EN]{hedging_mark}: {result.suggestion.answer_en}")
-                if getattr(result, "answer_ru", None):
-                    log_sensitive(f"[AI RU]: {result.answer_ru}")
-                    print(f"💡 [AI RU]: {result.answer_ru}")
-            print("=" * 60 + "\n")
+            if getattr(result, "answer_ru", None):
+                log_sensitive(f"[AI RU]: {result.answer_ru}")
+            return
 
-        # Log stage timings for performance analysis (no private data, always log)
-        if result.timings:
-            timing_parts = [f"{t.stage_name}={t.duration_s:.2f}s" for t in result.timings]
-            total = sum(t.duration_s for t in result.timings)
-            logger.info(f"[Timings] {' → '.join(timing_parts)} | total={total:.2f}s")
+        # CLI mode: print to console
+        print("\n" + "=" * 60)
+        log_sensitive(f"[EN]: {result.transcript}")
+        print(f"🗣️  [EN]: {result.transcript}")
+        if result.translation_ru:
+            log_sensitive(f"[RU]: {result.translation_ru}")
+            print(f"🇷🇺  [RU]: {result.translation_ru}")
+        if result.suggestion:
+            print("-" * 60)
+            hedging_mark = " ⚠️(uncertain)" if result.suggestion.has_hedging else ""
+            log_sensitive(f"[AI EN]: {result.suggestion.answer_en}")
+            print(f"💡 [AI EN]{hedging_mark}: {result.suggestion.answer_en}")
+            if getattr(result, "answer_ru", None):
+                log_sensitive(f"[AI RU]: {result.answer_ru}")
+                print(f"💡 [AI RU]: {result.answer_ru}")
+        print("=" * 60 + "\n")
 
     async def start(self, device_id: str | None = None):
         self._stop_event.clear()
@@ -480,9 +513,30 @@ class InterviewPipeline:
     def stop(self):
         self._stop_event.set()
 
-        # Audio backend will be stopped by the capture thread's finally block
+        # Force-stop audio to unblock read_chunk() in capture thread
+        try:
+            self.audio.stop()
+        except Exception as e:
+            logger.warning(f"Error stopping audio during shutdown: {e}")
+
+        # Send sentinel to unblock STT worker waiting on phrase_queue
+        try:
+            self.phrase_queue.put_nowait(None)
+        except queue.Full:
+            pass
+
         # Wait for threads to exit
         for t in self._threads:
-            t.join(timeout=2.0)
+            t.join(timeout=3.0)
+            if t.is_alive():
+                logger.warning(f"Thread {t.name} did not terminate in time.")
 
         self.vad.reset()  # Reset VAD state on stop
+
+        # Drain queues for clean restart
+        while not self.phrase_queue.empty():
+            try:
+                self.phrase_queue.get_nowait()
+            except queue.Empty:
+                break
+        self._threads = []

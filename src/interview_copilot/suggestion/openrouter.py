@@ -67,10 +67,16 @@ class OpenRouterSuggester:
             "Below is the candidate's profile. Use this to provide"
             " relevant and personalized answers.\n\n"
             f"--- CANDIDATE PROFILE ---\n{safe_content}\n-------------------------\n\n"
-            "Your task is to provide a brief, professional, and accurate"
-            " response to the interviewer's question.\n"
-            "Output your answer as plain text in English only.\n"
-            "Do NOT use markdown formatting, markdown blocks, or JSON."
+            "STRICT RULES:\n"
+            "1. NEVER invent companies, projects, achievements, or experience"
+            " that are NOT in the candidate's profile above.\n"
+            "2. If the profile does not contain enough information to answer"
+            " confidently, say so explicitly.\n"
+            "3. If a question is outside the candidate's stated expertise,"
+            " provide a general technical answer and note that it's general knowledge.\n"
+            "4. Keep your answer brief (2-4 sentences), professional, and accurate.\n"
+            "5. Output your answer as plain text in English only.\n"
+            "6. Do NOT use markdown formatting, markdown blocks, or JSON."
         )
         return prompt
 
@@ -106,7 +112,10 @@ class OpenRouterSuggester:
             return None
 
         system_prompt = self._build_system_prompt(profile)
-        user_prompt = f'Context of conversation:\n{context}\n\nSuggest a response.'
+        user_prompt = (
+            f"Conversation context:\n{context}\n\n"
+            f"Provide a suggested response to the CURRENT question only."
+        )
 
         try:
             response_stream = await self._client.chat.completions.create(
