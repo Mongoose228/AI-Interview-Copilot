@@ -14,7 +14,7 @@ from ..models import AudioChunk, SpeechPhrase
 from ..paths import get_models_dir
 
 # Expected sha256 of silero_vad.onnx (v4.0)
-_ONNX_SHA256 = "5605d3c01c0cf07ed9f30325fddb73248c8b4aebda3ec39cb16eebc89d280eec"
+_ONNX_SHA256 = "a35ebf52fd3ce5f1469b2a36158dba761bc47b973ea3382b3186ca15b1f5af28"
 
 # Pre-roll buffer size
 _PREROLL_CHUNKS = max(1, int(config.VAD_SPEECH_PAD_MS / (512 / 16.0)))
