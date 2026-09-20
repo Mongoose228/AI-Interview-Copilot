@@ -96,6 +96,11 @@ class FakeWhisperEngine:
             stt_duration_s=0.1,
             stt_started_at=started,
             stt_ended_at=started + 0.1,
+            is_final=phrase.is_final,
+            revision=phrase.revision,
+            speech_started_at=phrase.captured_at,
+            speech_ended_at=phrase.vad_end_at,
+            audio_duration_s=phrase.duration_s,
         )
 
 
@@ -103,16 +108,24 @@ class FakeVAD:
     def __init__(self, available=True):
         self._available = available
         self._flushed = False
+        self._is_speaking = False
 
     @property
     def is_available(self) -> bool:
         return self._available
+
+    @property
+    def is_speaking(self) -> bool:
+        return self._is_speaking
 
     def reset(self):
         pass
 
     def process_chunk(self, chunk: AudioChunk) -> list[SpeechPhrase]:
         return []
+
+    def get_partial_snapshot(self) -> SpeechPhrase | None:
+        return None
 
     def flush(self) -> SpeechPhrase | None:
         self._flushed = True

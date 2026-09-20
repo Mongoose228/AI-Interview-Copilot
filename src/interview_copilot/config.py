@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     MAX_LLM_TOKENS: int = 250
 
     # Whisper Settings
-    WHISPER_MODEL: str = "small.en"
+    WHISPER_MODEL: str = "base.en"
     WHISPER_DEVICE: str = "auto"
     WHISPER_COMPUTE_TYPE: str = "auto"
     WHISPER_BEAM_SIZE: int = 1
@@ -39,12 +39,17 @@ class Settings(BaseSettings):
     # VAD Settings
     VAD_THRESHOLD: float = 0.5
     VAD_MIN_SPEECH_MS: int = 250
-    VAD_SILENCE_MS: int = 600
+    VAD_SILENCE_MS: int = 350
     VAD_SPEECH_PAD_MS: int = 150
     VAD_MAX_PHRASE_SECONDS: int = 12
 
     # Debounce: seconds of silence after last transcript before sending to LLM.
-    LLM_DEBOUNCE_DELAY_S: float = 1.2
+    LLM_DEBOUNCE_DELAY_S: float = 0.4
+
+    # Partial STT settings (bounded to one in-flight CPU inference)
+    PARTIAL_TRANSCRIPTION_ENABLED: bool = True
+    PARTIAL_TRANSCRIPTION_INTERVAL_MS: int = 800
+    PARTIAL_TRANSCRIPTION_MIN_AUDIO_MS: int = 700
 
     # Translation Settings
     TRANSLATION_BACKEND: Literal["none", "deepl", "nllb"] = "none"

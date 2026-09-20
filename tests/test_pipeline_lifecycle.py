@@ -1,9 +1,13 @@
 """Tests for pipeline stop/start lifecycle with DI fakes."""
 import asyncio
 import queue
+import time
+import uuid
 
+import numpy as np
 import pytest
 
+from interview_copilot.models import SpeechPhrase
 from interview_copilot.pipeline import InterviewPipeline
 from tests.fakes import (
     FakeProfileManager,
@@ -72,3 +76,36 @@ def test_drop_oldest_on_full_queue():
         items.append(q.get_nowait())
 
     assert items == ["old2", "old3", "new_phrase"]
+
+
+def _phrase(phrase_id, revision, *, is_final=False):
+    return SpeechPhrase(
+        id=phrase_id,
+        audio_data=np.zeros(16000, dtype=np.float32),
+        duration_s=1.0,
+        captured_at=time.time() - 1.0,
+        vad_end_at=time.time(),
+        is_final=is_final,
+        revision=revision,
+    )
+
+
+def test_partial_mailbox_keeps_latest(pipeline):
+    phrase_id = uuid.uuid4()
+    pipeline._enqueue_partial(_phrase(phrase_id, 1))
+    pipeline._enqueue_partial(_phrase(phrase_id, 2))
+
+    latest = pipeline.partial_phrase_queue.get_nowait()
+    assert latest.revision == 2
+    assert pipeline.partial_phrase_queue.empty()
+
+
+def test_final_removes_stale_partial_and_has_priority(pipeline):
+    phrase_id = uuid.uuid4()
+    pipeline._enqueue_partial(_phrase(phrase_id, 1))
+    final = _phrase(phrase_id, 2, is_final=True)
+    pipeline._enqueue_final(final)
+
+    assert pipeline.partial_phrase_queue.empty()
+    assert pipeline.phrase_queue.get_nowait() is final
+    assert phrase_id in pipeline._final_phrase_ids

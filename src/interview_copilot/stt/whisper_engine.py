@@ -35,6 +35,10 @@ class WhisperEngine:
             f"Initializing WhisperModel '{self._model_size}'"
             f" on {self._device} ({self._compute_type})"
         )
+        logger.info(
+            f"[STT Config] model={self._model_size} device={self._device} "
+            f"compute={self._compute_type} cpu_threads={config.WHISPER_CPU_THREADS}"
+        )
         logger.info(f"Downloading/Loading Whisper model '{self._model_size}', please wait...")
 
         # Load model. If it's not present, faster-whisper will download it
@@ -97,11 +101,21 @@ class WhisperEngine:
                 # Consume generator completely inside the lock
                 segments = list(segments_gen)
                 stt_duration = time.time() - start_time
+                rtf = stt_duration / phrase.duration_s if phrase.duration_s > 0 else 0.0
+                logger.info(
+                    f"[STT] final={phrase.is_final} revision={phrase.revision} "
+                    f"audio={phrase.duration_s:.3f}s duration={stt_duration:.3f}s "
+                    f"rtf={rtf:.3f}"
+                )
 
                 if not segments:
                     return Transcript(
                         phrase.id, "", "en", 0.0, stt_duration,
                         stt_started_at=start_time, stt_ended_at=time.time(),
+                        is_final=phrase.is_final, revision=phrase.revision,
+                        speech_started_at=phrase.captured_at,
+                        speech_ended_at=phrase.vad_end_at,
+                        audio_duration_s=phrase.duration_s,
                     )
 
                 avg_logprob = sum(s.avg_logprob for s in segments) / len(segments)
@@ -117,6 +131,10 @@ class WhisperEngine:
                     return Transcript(
                         phrase.id, "", "en", 0.0, stt_duration,
                         stt_started_at=start_time, stt_ended_at=time.time(),
+                        is_final=phrase.is_final, revision=phrase.revision,
+                        speech_started_at=phrase.captured_at,
+                        speech_ended_at=phrase.vad_end_at,
+                        audio_duration_s=phrase.duration_s,
                     )
 
                 texts = [s.text.strip() for s in segments]
@@ -134,6 +152,10 @@ class WhisperEngine:
                     return Transcript(
                         phrase.id, "", "en", 0.0, stt_duration,
                         stt_started_at=start_time, stt_ended_at=time.time(),
+                        is_final=phrase.is_final, revision=phrase.revision,
+                        speech_started_at=phrase.captured_at,
+                        speech_ended_at=phrase.vad_end_at,
+                        audio_duration_s=phrase.duration_s,
                     )
 
                 # Use exp(avg_logprob) as a more meaningful confidence metric
@@ -149,6 +171,11 @@ class WhisperEngine:
                     stt_duration_s=stt_duration,
                     stt_started_at=start_time,
                     stt_ended_at=ended,
+                    is_final=phrase.is_final,
+                    revision=phrase.revision,
+                    speech_started_at=phrase.captured_at,
+                    speech_ended_at=phrase.vad_end_at,
+                    audio_duration_s=phrase.duration_s,
                 )
             except (RuntimeError, ValueError, TypeError, OSError) as e:
                 logger.error(f"Whisper transcription failed: {e}")
@@ -161,4 +188,9 @@ class WhisperEngine:
                     stt_duration_s=stt_duration,
                     stt_started_at=start_time,
                     stt_ended_at=time.time(),
+                    is_final=phrase.is_final,
+                    revision=phrase.revision,
+                    speech_started_at=phrase.captured_at,
+                    speech_ended_at=phrase.vad_end_at,
+                    audio_duration_s=phrase.duration_s,
                 )

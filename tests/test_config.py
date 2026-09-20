@@ -13,13 +13,18 @@ def test_default_config(monkeypatch):
     assert config.DEEPL_API_KEY is None
     assert config.OPENROUTER_API_KEY is None
     assert config.OPENROUTER_MODEL == "google/gemini-2.5-flash"
-    assert config.WHISPER_MODEL == "small.en"
+    assert config.WHISPER_MODEL == "base.en"
     assert config.NETWORK_CONNECT_TIMEOUT == 5
     assert config.NETWORK_READ_TIMEOUT == 30
     assert config.TRANSLATION_BACKEND == "none"
     assert config.VAD_THRESHOLD == 0.5
-    assert config.VAD_SILENCE_MS == 600
+    assert config.VAD_SILENCE_MS == 350
     assert config.WHISPER_BEAM_SIZE == 1
+    assert config.WHISPER_CPU_THREADS == 4
+    assert config.LLM_DEBOUNCE_DELAY_S == 0.4
+    assert config.PARTIAL_TRANSCRIPTION_ENABLED is True
+    assert config.PARTIAL_TRANSCRIPTION_INTERVAL_MS == 800
+    assert config.PARTIAL_TRANSCRIPTION_MIN_AUDIO_MS == 700
 
 
 def test_custom_config(monkeypatch):

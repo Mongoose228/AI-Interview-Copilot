@@ -72,7 +72,8 @@ def start_gui(device_id: str | None = None):
         logger.warning(f"Could not list audio devices: {e}")
         window.populate_devices([], device_id)
 
-    signals.transcript_ready.connect(window.add_transcript)
+    signals.transcript_ready.connect(window.upsert_transcript)
+    signals.transcript_removed.connect(window.remove_transcript)
     signals.suggestion_ready.connect(window.update_suggestion)
     signals.suggestion_token.connect(window.append_token)
 
@@ -104,6 +105,9 @@ def start_gui(device_id: str | None = None):
             def on_transcript(result):
                 signals.transcript_ready.emit(result)
 
+            def on_transcript_remove(phrase_id):
+                signals.transcript_removed.emit(phrase_id)
+
             def on_suggestion(result):
                 signals.suggestion_ready.emit(result)
 
@@ -126,6 +130,7 @@ def start_gui(device_id: str | None = None):
                 error_callback=on_error,
                 audio_status_callback=on_audio_status,
                 status_callback=on_status,
+                transcript_remove_callback=on_transcript_remove,
             )
 
             loop = asyncio.new_event_loop()

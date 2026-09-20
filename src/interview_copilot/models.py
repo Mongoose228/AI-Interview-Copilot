@@ -31,6 +31,8 @@ class SpeechPhrase:
     duration_s: float
     captured_at: float
     vad_end_at: float
+    is_final: bool = True
+    revision: int = 0
 
 
 @dataclass(frozen=True)
@@ -43,6 +45,11 @@ class Transcript:
     speaker: str = "interviewer"  # reserved for future diarization
     stt_started_at: float = 0.0
     stt_ended_at: float = 0.0
+    is_final: bool = True
+    revision: int = 0
+    speech_started_at: float = 0.0
+    speech_ended_at: float = 0.0
+    audio_duration_s: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -79,3 +86,4 @@ class PipelineResult:
     is_cancelled: bool = False
     answer_ru: str | None = None
     suggestion_status: SuggestionStatus = SuggestionStatus.PENDING
+    is_provisional: bool = False

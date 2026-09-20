@@ -59,6 +59,7 @@ def test_vad_flush(vad):
     phrase = vad.flush()
     assert phrase is not None
     assert phrase.duration_s >= 0.25
+    assert phrase.is_final
     assert not vad._is_speaking
 
 
@@ -88,5 +89,74 @@ def test_fast_subsequent_speech(vad):
     assert len(phrases) == 1
 
     vad._infer.side_effect = [0.9] + [0.0] * 50
+    second_phrases = vad.process_chunk(chunk)
+    assert len(second_phrases) == 1
+    assert len(vad._preroll_buffer) <= vad._preroll_buffer.maxlen
+
+
+def test_partial_snapshots_keep_stable_id_and_buffer(vad):
+    vad._infer = MagicMock(return_value=0.9)
+    first_audio = AudioChunk(
+        uuid.uuid4(),
+        np.zeros((512 * 25, 2), dtype=np.float32),
+        16000,
+        2,
+        10.0,
+    )
+    vad.process_chunk(first_audio)
+
+    buffer_size = len(vad._phrase_buffer)
+    first = vad.get_partial_snapshot()
+    assert first is not None
+    assert not first.is_final
+    assert first.revision == 1
+    assert len(vad._phrase_buffer) == buffer_size
+    assert vad.get_partial_snapshot() is None
+
+    second_audio = AudioChunk(
+        uuid.uuid4(),
+        np.zeros((512 * 25, 2), dtype=np.float32),
+        16000,
+        2,
+        10.8,
+    )
+    vad.process_chunk(second_audio)
+    second = vad.get_partial_snapshot()
+    assert second is not None
+    assert second.id == first.id
+    assert second.revision == 2
+    assert second.duration_s > first.duration_s
+
+    vad._infer = MagicMock(return_value=0.0)
+    silence = AudioChunk(
+        uuid.uuid4(),
+        np.zeros((512 * 12, 2), dtype=np.float32),
+        16000,
+        2,
+        11.2,
+    )
+    finals = vad.process_chunk(silence)
+    assert len(finals) == 1
+    assert finals[0].id == first.id
+    assert finals[0].is_final
+    assert finals[0].revision == 3
+
+
+def test_flush_uses_same_id_as_partial(vad):
+    vad._infer = MagicMock(return_value=0.9)
+    chunk = AudioChunk(
+        uuid.uuid4(),
+        np.zeros((512 * 25, 2), dtype=np.float32),
+        16000,
+        2,
+        20.0,
+    )
     vad.process_chunk(chunk)
-    assert len(vad._preroll_buffer) == 0
+    partial = vad.get_partial_snapshot()
+    final = vad.flush()
+
+    assert partial is not None
+    assert final is not None
+    assert final.id == partial.id
+    assert final.is_final
+    assert final.revision == partial.revision + 1

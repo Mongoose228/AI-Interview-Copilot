@@ -10,7 +10,7 @@ via OpenRouter.
 - Python **3.11+**
 - OpenRouter API key (suggestions)
 - Optional: DeepL API key (cloud translation)
-- Interview audio in **English** (`WHISPER_MODEL=small.en` by default)
+- Interview audio in **English** (`WHISPER_MODEL=base.en` by default)
 
 ## Install
 
@@ -78,6 +78,31 @@ interview-copilot-cli run
 - `deepl` — requires `DEEPL_API_KEY`
 - `nllb` — local model (`pip install -e ".[nllb]"`); slow on CPU
 
+## Low-latency transcription
+
+The CPU profile uses `base.en`, 350 ms VAD silence and a 400 ms LLM debounce.
+While speech is active, the app takes a bounded snapshot roughly every 800 ms:
+
+- only one Whisper inference runs at a time;
+- at most one pending partial snapshot is retained;
+- provisional text updates one existing card;
+- only final text enters conversation history and OpenRouter;
+- final phrases take priority over stale partial snapshots.
+
+Relevant `.env` settings:
+
+```env
+WHISPER_MODEL=base.en
+VAD_SILENCE_MS=350
+LLM_DEBOUNCE_DELAY_S=0.4
+PARTIAL_TRANSCRIPTION_ENABLED=true
+PARTIAL_TRANSCRIPTION_INTERVAL_MS=800
+PARTIAL_TRANSCRIPTION_MIN_AUDIO_MS=700
+```
+
+`WHISPER_CPU_THREADS=4` remains unchanged. Logs include text-free latency and
+real-time-factor metrics under `[Latency]` and `[STT]`.
+
 ## Privacy
 
 Transcripts and the candidate profile are **always** sent to OpenRouter when suggestions
@@ -94,7 +119,8 @@ A one-time banner explains this on first launch.
 | "No candidate profile" | Create a `.md` under context dir (not only `example_profile`) |
 | DeepL warning | Set `DEEPL_API_KEY` or set `TRANSLATION_BACKEND=none` |
 | Slow first start | Whisper model download/warmup; VAD ONNX download |
-| GPU | `WHISPER_DEVICE=cuda` when CUDA + ctranslate2 GPU build available |
+| High CPU usage | Increase `PARTIAL_TRANSCRIPTION_INTERVAL_MS` or disable partial transcription |
+| Partial text changes | Expected: provisional text is replaced by the final Whisper result |
 
 ## Development
 

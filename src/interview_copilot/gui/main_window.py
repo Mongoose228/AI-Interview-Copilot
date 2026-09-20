@@ -54,10 +54,9 @@ class ResultWidget(QFrame):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(6)
 
-        lbl_en = QLabel(f"🎙️ <b>EN:</b> {_esc(result.transcript)}")
-        lbl_en.setWordWrap(True)
-        lbl_en.setStyleSheet("color: #CCCCCC; font-size: 13px;")
-        layout.addWidget(lbl_en)
+        self.lbl_en = QLabel()
+        self.lbl_en.setWordWrap(True)
+        layout.addWidget(self.lbl_en)
 
         self.lbl_ru = QLabel("")
         self.lbl_ru.setWordWrap(True)
@@ -102,6 +101,27 @@ class ResultWidget(QFrame):
         layout.addLayout(btn_row)
 
         self.current_suggestion_text = ""
+        self.update_transcript(result)
+
+    def update_transcript(self, result: PipelineResult):
+        """Update provisional/final transcript without replacing the card."""
+        self.lbl_en.setText(f"🎙️ <b>EN:</b> {_esc(result.transcript)}")
+        if result.is_provisional:
+            self.lbl_en.setStyleSheet(
+                "color: #999999; font-size: 13px; font-style: italic;"
+            )
+            if not self.current_suggestion_text:
+                self.lbl_ai.setText("🎧 <i>Listening...</i>")
+                self.lbl_ai.setStyleSheet(
+                    "color: #777777; font-size: 13px; font-style: italic;"
+                )
+        else:
+            self.lbl_en.setStyleSheet("color: #CCCCCC; font-size: 13px;")
+            if not self.current_suggestion_text:
+                self.lbl_ai.setText("🤔 <i>Thinking...</i>")
+                self.lbl_ai.setStyleSheet(
+                    "color: #888888; font-size: 13px; font-style: italic;"
+                )
 
     def _copy_suggestion(self):
         if self.current_suggestion_text:
@@ -461,7 +481,13 @@ class CopilotMainWindow(QMainWindow):
             self._drag_pos = None
         return super().eventFilter(obj, event)
 
-    def add_transcript(self, result: PipelineResult):
+    def upsert_transcript(self, result: PipelineResult):
+        existing = self._widget_map.get(result.id)
+        if existing:
+            existing.update_transcript(result)
+            QTimer.singleShot(10, self._scroll_to_bottom)
+            return
+
         widget = ResultWidget(result)
         self.scroll_layout.addWidget(widget)
         self._result_widgets.append(widget)
@@ -474,6 +500,19 @@ class CopilotMainWindow(QMainWindow):
             oldest.deleteLater()
 
         QTimer.singleShot(50, self._scroll_to_bottom)
+
+    # Backwards-compatible alias for callers/tests using the old API.
+    def add_transcript(self, result: PipelineResult):
+        self.upsert_transcript(result)
+
+    def remove_transcript(self, phrase_id):
+        widget = self._widget_map.pop(phrase_id, None)
+        if not widget:
+            return
+        if widget in self._result_widgets:
+            self._result_widgets.remove(widget)
+        self.scroll_layout.removeWidget(widget)
+        widget.deleteLater()
 
     def update_suggestion(self, result: PipelineResult):
         widget = self._widget_map.get(result.id)

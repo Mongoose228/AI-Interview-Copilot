@@ -57,8 +57,12 @@ class InterviewPipeline:
         self.profile_mgr = profile_mgr or ProfileManager()
 
         self.phrase_queue = queue.Queue(maxsize=20)
+        self.partial_phrase_queue = queue.Queue(maxsize=1)
         self.transcript_queue = None
         self._loop = None
+        self._stt_busy = threading.Event()
+        self._phrase_state_lock = threading.Lock()
+        self._final_phrase_ids: set = set()
 
         self._stop_event = threading.Event()
         self._pause_event = threading.Event()  # set = paused
@@ -67,6 +71,7 @@ class InterviewPipeline:
         self._restart_capture = threading.Event()
 
         self._transcript_callback = None
+        self._transcript_remove_callback = None
         self._suggestion_callback = None
         self._token_callback = None
         self._audio_status_callback = None
@@ -89,6 +94,7 @@ class InterviewPipeline:
         error_callback,
         audio_status_callback,
         status_callback=None,
+        transcript_remove_callback=None,
     ):
         self._transcript_callback = transcript_callback
         self._suggestion_callback = suggestion_callback
@@ -96,6 +102,38 @@ class InterviewPipeline:
         self._error_callback = error_callback
         self._audio_status_callback = audio_status_callback
         self._status_callback = status_callback
+        self._transcript_remove_callback = transcript_remove_callback
+
+    def _enqueue_partial(self, phrase) -> None:
+        """Keep only the newest partial snapshot."""
+        try:
+            self.partial_phrase_queue.put_nowait(phrase)
+        except queue.Full:
+            try:
+                self.partial_phrase_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self.partial_phrase_queue.put_nowait(phrase)
+            except queue.Full:
+                pass
+
+    def _enqueue_final(self, phrase) -> None:
+        """Final phrases use their own queue and are never displaced by partials."""
+        with self._phrase_state_lock:
+            self._final_phrase_ids.add(phrase.id)
+        try:
+            queued_partial = self.partial_phrase_queue.get_nowait()
+            if queued_partial.id != phrase.id:
+                self._enqueue_partial(queued_partial)
+        except queue.Empty:
+            pass
+        while not self._stop_event.is_set():
+            try:
+                self.phrase_queue.put(phrase, timeout=0.2)
+                return
+            except queue.Full:
+                logger.warning("Final phrase queue full; waiting for STT worker.")
 
     def set_active_profile(self, name: str) -> bool:
         snapshot = self.profile_mgr.load_profile(name)
@@ -177,18 +215,16 @@ class InterviewPipeline:
 
                     phrases = self.vad.process_chunk(chunk)
                     for p in phrases:
-                        try:
-                            self.phrase_queue.put_nowait(p)
-                        except queue.Full:
-                            try:
-                                self.phrase_queue.get_nowait()
-                            except queue.Empty:
-                                pass
-                            try:
-                                self.phrase_queue.put_nowait(p)
-                            except queue.Full:
-                                pass
-                            logger.warning("Phrase queue full, dropped oldest phrase.")
+                        self._enqueue_final(p)
+
+                    if (
+                        config.PARTIAL_TRANSCRIPTION_ENABLED
+                        and not self._stt_busy.is_set()
+                        and self.phrase_queue.empty()
+                    ):
+                        partial = self.vad.get_partial_snapshot()
+                        if partial:
+                            self._enqueue_partial(partial)
 
             except (RuntimeError, ValueError, TypeError, OSError) as e:
                 if self._stop_event.is_set() or self._pause_event.is_set():
@@ -241,15 +277,41 @@ class InterviewPipeline:
         logger.info("STT thread started.")
         while not self._stop_event.is_set():
             try:
-                phrase = self.phrase_queue.get(timeout=0.5)
+                try:
+                    phrase = self.phrase_queue.get_nowait()
+                except queue.Empty:
+                    try:
+                        phrase = self.partial_phrase_queue.get(timeout=0.2)
+                    except queue.Empty:
+                        continue
                 if phrase is None:
                     break
                 if not hasattr(phrase, "audio_data"):
                     continue
+                if not phrase.is_final:
+                    with self._phrase_state_lock:
+                        if phrase.id in self._final_phrase_ids:
+                            continue
                 if self._status_callback:
                     self._status_callback("Transcribing…")
-                transcript = self.stt.transcribe(phrase)
-                if transcript.text_en and self._loop and self.transcript_queue:
+                self._stt_busy.set()
+                try:
+                    transcript = self.stt.transcribe(phrase)
+                finally:
+                    self._stt_busy.clear()
+                if phrase.is_final:
+                    with self._phrase_state_lock:
+                        self._final_phrase_ids.discard(phrase.id)
+                if (
+                    (transcript.text_en or transcript.is_final)
+                    and self._loop
+                    and self.transcript_queue
+                ):
+                    if transcript.is_final and transcript.speech_ended_at:
+                        logger.info(
+                            "[Latency] speech_end_to_final_stt_ready="
+                            f"{max(0.0, transcript.stt_ended_at - transcript.speech_ended_at):.3f}s"
+                        )
                     self._loop.call_soon_threadsafe(
                         self.transcript_queue.put_nowait, transcript
                     )
@@ -288,6 +350,7 @@ class InterviewPipeline:
         translation_coro = None
         suggestion_coro = None
         tokens_received = False
+        first_token_logged = False
 
         async def timed_translate():
             start_t = time.time()
@@ -304,9 +367,16 @@ class InterviewPipeline:
             return res
 
         async def stream_cb(token: str):
-            nonlocal tokens_received
+            nonlocal tokens_received, first_token_logged
             tokens_received = True
             self._tokens_seen.add(transcript.phrase_id)
+            if not first_token_logged:
+                first_token_logged = True
+                if transcript.speech_ended_at:
+                    latency = max(0.0, time.time() - transcript.speech_ended_at)
+                    logger.info(
+                        f"[Latency] speech_end_to_first_llm_token={latency:.3f}s"
+                    )
             if self._token_callback:
                 self._token_callback(transcript.phrase_id, token)
 
@@ -444,6 +514,10 @@ class InterviewPipeline:
         current_llm_task = None
         pending_transcripts: list[Transcript] = []
         debounce_task: asyncio.Task | None = None
+        active_card_id = None
+        latest_partial_revisions: dict = {}
+        first_partial_cards: set = set()
+        phrase_card_ids: dict = {}
 
         if config.TRANSLATION_BACKEND == "deepl":
             if not self.translator or not getattr(self.translator, "is_available", False):
@@ -461,19 +535,26 @@ class InterviewPipeline:
             )
 
         async def flush_pending():
-            nonlocal current_llm_task, pending_transcripts
+            nonlocal current_llm_task, pending_transcripts, active_card_id
 
             await asyncio.sleep(config.LLM_DEBOUNCE_DELAY_S)
+            # A new phrase may already be in progress before its first partial STT result.
+            # Keep the current question open until VAD finalizes that phrase.
+            while getattr(self.vad, "is_speaking", False):
+                await asyncio.sleep(0.05)
 
             if not pending_transcripts:
                 return
 
             segments = pending_transcripts
             pending_transcripts = []
+            card_id = active_card_id or segments[0].phrase_id
+            active_card_id = None
+            first_partial_cards.discard(card_id)
 
             merged_text = " ".join(t.text_en for t in segments)
             merged_transcript = Transcript(
-                phrase_id=segments[-1].phrase_id,
+                phrase_id=card_id,
                 text_en=merged_text,
                 language=segments[0].language,
                 confidence=min(t.confidence for t in segments),
@@ -486,6 +567,17 @@ class InterviewPipeline:
                     (t.stt_ended_at for t in segments if t.stt_ended_at),
                     default=0.0,
                 ),
+                is_final=True,
+                revision=max(t.revision for t in segments),
+                speech_started_at=min(
+                    (t.speech_started_at for t in segments if t.speech_started_at),
+                    default=0.0,
+                ),
+                speech_ended_at=max(
+                    (t.speech_ended_at for t in segments if t.speech_ended_at),
+                    default=0.0,
+                ),
+                audio_duration_s=sum(t.audio_duration_s for t in segments),
             )
 
             logger.info(
@@ -505,16 +597,17 @@ class InterviewPipeline:
             with self._profile_lock:
                 profile = self._active_profile
 
-            # Emit card once after merge
+            # Final upsert keeps the same card used by partial/final STT.
             if self._transcript_callback:
                 initial_result = PipelineResult(
-                    id=merged_transcript.phrase_id,
+                    id=card_id,
                     transcript=merged_transcript.text_en,
                     translation_ru=None,
                     suggestion=None,
                     profile=profile,
                     created_at=time.time(),
                     suggestion_status=SuggestionStatus.PENDING,
+                    is_provisional=False,
                 )
                 self._transcript_callback(initial_result)
 
@@ -547,16 +640,112 @@ class InterviewPipeline:
                 continue
 
             try:
+                if transcript.is_final and (
+                    not transcript.text_en or not transcript.text_en.strip()
+                ):
+                    provisional_card_id = phrase_card_ids.pop(
+                        transcript.phrase_id, None
+                    )
+                    latest_partial_revisions.pop(transcript.phrase_id, None)
+                    if (
+                        not pending_transcripts
+                        and provisional_card_id is not None
+                    ):
+                        if self._transcript_remove_callback:
+                            self._transcript_remove_callback(provisional_card_id)
+                        first_partial_cards.discard(provisional_card_id)
+                        if active_card_id == provisional_card_id:
+                            active_card_id = None
+                    continue
+
                 if not transcript.text_en or not transcript.text_en.strip():
                     continue
 
+                if not transcript.is_final:
+                    previous_revision = latest_partial_revisions.get(
+                        transcript.phrase_id, -1
+                    )
+                    if transcript.revision <= previous_revision:
+                        continue
+                    latest_partial_revisions[transcript.phrase_id] = transcript.revision
+
+                    if active_card_id is None:
+                        active_card_id = transcript.phrase_id
+                    phrase_card_ids[transcript.phrase_id] = active_card_id
+
+                    prefix = " ".join(t.text_en for t in pending_transcripts)
+                    display_text = " ".join(
+                        part for part in (prefix, transcript.text_en) if part
+                    )
+                    with self._profile_lock:
+                        profile = self._active_profile
+                    if self._transcript_callback:
+                        self._transcript_callback(
+                            PipelineResult(
+                                id=active_card_id,
+                                transcript=display_text,
+                                translation_ru=None,
+                                suggestion=None,
+                                profile=profile,
+                                created_at=time.time(),
+                                suggestion_status=SuggestionStatus.PENDING,
+                                is_provisional=True,
+                            )
+                        )
+                    if active_card_id not in first_partial_cards:
+                        first_partial_cards.add(active_card_id)
+                        if transcript.speech_started_at:
+                            latency = max(
+                                0.0, time.time() - transcript.speech_started_at
+                            )
+                            logger.info(
+                                "[Latency] "
+                                f"speech_start_to_first_partial_visible={latency:.3f}s"
+                            )
+                    continue
+
+                latest_partial_revisions.pop(transcript.phrase_id, None)
+                phrase_card_ids.pop(transcript.phrase_id, None)
                 if is_filler(transcript.text_en):
                     logger.debug(
                         f"Dropped filler from LLM processing: '{transcript.text_en}'"
                     )
+                    if not pending_transcripts and active_card_id is not None:
+                        if self._transcript_remove_callback:
+                            self._transcript_remove_callback(active_card_id)
+                        first_partial_cards.discard(active_card_id)
+                        active_card_id = None
                     continue
 
+                if active_card_id is None:
+                    active_card_id = transcript.phrase_id
                 pending_transcripts.append(transcript)
+
+                final_text = " ".join(t.text_en for t in pending_transcripts)
+                with self._profile_lock:
+                    profile = self._active_profile
+                if self._transcript_callback:
+                    visible_at = time.time()
+                    self._transcript_callback(
+                        PipelineResult(
+                            id=active_card_id,
+                            transcript=final_text,
+                            translation_ru=None,
+                            suggestion=None,
+                            profile=profile,
+                            created_at=visible_at,
+                            suggestion_status=SuggestionStatus.PENDING,
+                            is_provisional=False,
+                        )
+                    )
+                    if transcript.speech_ended_at:
+                        logger.info(
+                            "[Latency] "
+                            "speech_end_to_final_visible="
+                            f"{max(0.0, visible_at - transcript.speech_ended_at):.3f}s "
+                            "final_stt_to_visible="
+                            f"{max(0.0, visible_at - transcript.stt_ended_at):.3f}s"
+                        )
 
                 if debounce_task and not debounce_task.done():
                     debounce_task.cancel()
@@ -676,4 +865,11 @@ class InterviewPipeline:
                 self.phrase_queue.get_nowait()
             except queue.Empty:
                 break
+        while not self.partial_phrase_queue.empty():
+            try:
+                self.partial_phrase_queue.get_nowait()
+            except queue.Empty:
+                break
+        with self._phrase_state_lock:
+            self._final_phrase_ids.clear()
         self._threads = []

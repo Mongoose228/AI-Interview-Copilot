@@ -98,6 +98,10 @@ class SileroVAD:
         self._silence_duration_ms = 0
         self._is_speaking = False
         self._current_phrase_start_time = 0.0
+        self._current_phrase_id: uuid.UUID | None = None
+        self._partial_revision = 0
+        self._last_partial_samples = 0
+        self._latest_chunk_at = 0.0
         self._sample_buffer = np.array([], dtype=np.float32)
 
         # Pre-roll ring buffer: keeps last N chunks so we don't clip speech onset
@@ -107,6 +111,11 @@ class SileroVAD:
     def is_available(self) -> bool:
         """Return True if VAD model loaded successfully."""
         return self._vad_lib_available
+
+    @property
+    def is_speaking(self) -> bool:
+        """Return whether VAD is currently collecting an active phrase."""
+        return self._is_speaking
 
     def _reset_onnx_state(self):
         if self._model_version == 4:
@@ -152,8 +161,57 @@ class SileroVAD:
         self._silence_duration_ms = 0
         self._is_speaking = False
         self._current_phrase_start_time = 0.0
+        self._current_phrase_id = None
+        self._partial_revision = 0
+        self._last_partial_samples = 0
+        self._latest_chunk_at = 0.0
         self._sample_buffer = np.array([], dtype=np.float32)
         self._preroll_buffer.clear()
+
+    def _begin_phrase(self, captured_at: float) -> None:
+        self._current_phrase_id = uuid.uuid4()
+        self._current_phrase_start_time = captured_at
+        self._partial_revision = 0
+        self._last_partial_samples = 0
+
+    def _build_phrase(self, *, is_final: bool, ended_at: float) -> SpeechPhrase:
+        full_phrase_audio = np.concatenate(self._phrase_buffer)
+        revision = self._partial_revision + 1 if is_final else self._partial_revision
+        return SpeechPhrase(
+            id=self._current_phrase_id or uuid.uuid4(),
+            audio_data=full_phrase_audio.copy(),
+            duration_s=len(full_phrase_audio) / self._sample_rate,
+            captured_at=self._current_phrase_start_time,
+            vad_end_at=ended_at,
+            is_final=is_final,
+            revision=revision,
+        )
+
+    def get_partial_snapshot(self) -> SpeechPhrase | None:
+        """Return a non-destructive, throttled snapshot of the active phrase."""
+        if (
+            not config.PARTIAL_TRANSCRIPTION_ENABLED
+            or not self._vad_lib_available
+            or not self._is_speaking
+            or not self._phrase_buffer
+        ):
+            return None
+
+        sample_count = sum(len(part) for part in self._phrase_buffer)
+        audio_ms = sample_count / self._sample_rate * 1000
+        if audio_ms < config.PARTIAL_TRANSCRIPTION_MIN_AUDIO_MS:
+            return None
+
+        new_samples = sample_count - self._last_partial_samples
+        min_new_samples = int(
+            self._sample_rate * config.PARTIAL_TRANSCRIPTION_INTERVAL_MS / 1000
+        )
+        if self._last_partial_samples and new_samples < min_new_samples:
+            return None
+
+        self._partial_revision += 1
+        self._last_partial_samples = sample_count
+        return self._build_phrase(is_final=False, ended_at=self._latest_chunk_at)
 
     def process_chunk(self, chunk: AudioChunk) -> list[SpeechPhrase]:
         """
@@ -165,6 +223,7 @@ class SileroVAD:
         # We assume the input is already 16kHz mono (e.g. from WASAPI or soundcard config)
         # However, WASAPI returns stereo by default, so we mix to mono if needed
         data = chunk.data
+        self._latest_chunk_at = chunk.captured_at
         if data.ndim == 2 and data.shape[1] > 1:
             data = np.mean(data, axis=1)
 
@@ -188,7 +247,7 @@ class SileroVAD:
                         self._phrase_buffer = list(self._preroll_buffer)
                         self._preroll_buffer.clear()
                         self._phrase_buffer.append(vad_chunk)
-                        self._current_phrase_start_time = chunk.captured_at
+                        self._begin_phrase(chunk.captured_at)
                         self._phrase_duration_ms = len(self._phrase_buffer) * (512 / 16.0)
                     else:
                         self._phrase_buffer.append(vad_chunk)
@@ -203,23 +262,24 @@ class SileroVAD:
                             # END SPEAKING
                             self._is_speaking = False
 
-                            full_phrase_audio = np.concatenate(self._phrase_buffer)
-                            duration_s = len(full_phrase_audio) / self._sample_rate
+                            duration_s = (
+                                sum(len(part) for part in self._phrase_buffer)
+                                / self._sample_rate
+                            )
 
                             if duration_s * 1000 >= config.VAD_MIN_SPEECH_MS:
                                 phrases.append(
-                                    SpeechPhrase(
-                                        id=uuid.uuid4(),
-                                        audio_data=full_phrase_audio,
-                                        duration_s=duration_s,
-                                        captured_at=self._current_phrase_start_time,
-                                        vad_end_at=chunk.captured_at,
+                                    self._build_phrase(
+                                        is_final=True, ended_at=chunk.captured_at
                                     )
                                 )
 
                             self._phrase_buffer = []
                             self._phrase_duration_ms = 0
                             self._silence_duration_ms = 0
+                            self._current_phrase_id = None
+                            self._partial_revision = 0
+                            self._last_partial_samples = 0
                     else:
                         # Not speaking: feed pre-roll buffer
                         self._preroll_buffer.append(vad_chunk)
@@ -230,21 +290,14 @@ class SileroVAD:
                     and self._phrase_duration_ms
                     > config.VAD_MAX_PHRASE_SECONDS * 1000
                 ):
-                    full_phrase_audio = np.concatenate(self._phrase_buffer)
                     phrases.append(
-                        SpeechPhrase(
-                            id=uuid.uuid4(),
-                            audio_data=full_phrase_audio,
-                            duration_s=len(full_phrase_audio) / self._sample_rate,
-                            captured_at=self._current_phrase_start_time,
-                            vad_end_at=chunk.captured_at,
-                        )
+                        self._build_phrase(is_final=True, ended_at=chunk.captured_at)
                     )
                     # Reset but keep speaking true to continue buffering next part
                     self._phrase_buffer = []
                     self._phrase_duration_ms = 0
                     self._silence_duration_ms = 0
-                    self._current_phrase_start_time = chunk.captured_at
+                    self._begin_phrase(chunk.captured_at)
 
             except (RuntimeError, ValueError, TypeError, OSError) as e:
                 logger.error(f"VAD Error: {e}")
@@ -257,23 +310,21 @@ class SileroVAD:
             return None
 
         if self._phrase_buffer and self._phrase_duration_ms > config.VAD_MIN_SPEECH_MS:
-            full_phrase_audio = np.concatenate(self._phrase_buffer)
-            duration_s = len(full_phrase_audio) / self._sample_rate
-            phrase = SpeechPhrase(
-                id=uuid.uuid4(),
-                audio_data=full_phrase_audio,
-                duration_s=duration_s,
-                captured_at=self._current_phrase_start_time,
-                vad_end_at=time.time(),
-            )
+            phrase = self._build_phrase(is_final=True, ended_at=time.time())
             self._phrase_buffer = []
             self._phrase_duration_ms = 0
             self._silence_duration_ms = 0
             self._is_speaking = False
+            self._current_phrase_id = None
+            self._partial_revision = 0
+            self._last_partial_samples = 0
             return phrase
 
         self._phrase_buffer = []
         self._phrase_duration_ms = 0
         self._silence_duration_ms = 0
         self._is_speaking = False
+        self._current_phrase_id = None
+        self._partial_revision = 0
+        self._last_partial_samples = 0
         return None

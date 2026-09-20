@@ -3,6 +3,7 @@ from PySide6.QtCore import QObject, Signal
 
 class PipelineSignals(QObject):
     transcript_ready = Signal(object)
+    transcript_removed = Signal(object)
     suggestion_ready = Signal(object)
     suggestion_token = Signal(object, str)
     # msg, transient

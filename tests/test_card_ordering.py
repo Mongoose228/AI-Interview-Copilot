@@ -69,3 +69,59 @@ def test_skipped_no_key_status():
         )
     )
     assert "OPENROUTER_API_KEY" in window._result_widgets[0].lbl_ai.text()
+
+
+def test_partial_and_final_upsert_same_card():
+    window = CopilotMainWindow()
+    phrase_id = uuid.uuid4()
+    partial = PipelineResult(
+        phrase_id,
+        "What is asyn",
+        None,
+        None,
+        None,
+        is_provisional=True,
+    )
+    window.upsert_transcript(partial)
+    widget = window._result_widgets[0]
+
+    assert len(window._result_widgets) == 1
+    assert "Listening" in widget.lbl_ai.text()
+    assert "italic" in widget.lbl_en.styleSheet()
+
+    final = PipelineResult(
+        phrase_id,
+        "What is asyncio?",
+        None,
+        None,
+        None,
+        is_provisional=False,
+    )
+    window.upsert_transcript(final)
+
+    assert len(window._result_widgets) == 1
+    assert window._result_widgets[0] is widget
+    assert "asyncio" in widget.lbl_en.text()
+    assert "Thinking" in widget.lbl_ai.text()
+    assert "italic" not in widget.lbl_en.styleSheet()
+
+    window.append_token(phrase_id, "Asyncio runs an event loop.")
+    assert "event loop" in widget.current_suggestion_text
+
+
+def test_remove_provisional_card():
+    window = CopilotMainWindow()
+    first_id = uuid.uuid4()
+    second_id = uuid.uuid4()
+    window.upsert_transcript(
+        PipelineResult(first_id, "okay", None, None, None, is_provisional=True)
+    )
+    window.upsert_transcript(
+        PipelineResult(second_id, "real question", None, None, None)
+    )
+
+    window.remove_transcript(first_id)
+
+    assert len(window._result_widgets) == 1
+    assert window._result_widgets[0].phrase_id == second_id
+    assert first_id not in window._widget_map
