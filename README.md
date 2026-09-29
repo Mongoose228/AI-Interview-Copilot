@@ -103,6 +103,9 @@ PARTIAL_TRANSCRIPTION_MIN_AUDIO_MS=700
 `WHISPER_CPU_THREADS=4` remains unchanged. Logs include text-free latency and
 real-time-factor metrics under `[Latency]` and `[STT]`.
 
+Details and acceptance targets: [PERFORMANCE_ROADMAP.md](PERFORMANCE_ROADMAP.md).
+Next product steps (settings UI, tagged 0.3.0): [CHANGELOG.md](CHANGELOG.md).
+
 ## Privacy
 
 Transcripts and the candidate profile are **always** sent to OpenRouter when suggestions

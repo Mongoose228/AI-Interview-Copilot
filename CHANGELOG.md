@@ -2,11 +2,27 @@
 
 ## Unreleased
 
-- Added bounded partial Whisper transcription for faster CPU feedback
-- Provisional and final transcripts now update one stable card
-- Reduced defaults to 350 ms VAD silence and 400 ms LLM debounce
-- Switched the default CPU model from `small.en` to `base.en`
-- Added text-free latency and Whisper real-time-factor metrics
+### Added
+
+- Bounded partial Whisper transcription for faster CPU feedback
+- Provisional and final transcripts update one stable card
+- Text-free latency and Whisper real-time-factor metrics in logs
+
+### Changed
+
+- Defaults: 350 ms VAD silence, 400 ms LLM debounce
+- Default CPU model: `small.en` → `base.en`
+
+### Docs
+
+- Rewrote `PERFORMANCE_ROADMAP.md` to match shipped CPU profile and remaining validation
+
+### Planned for 0.3.0
+
+- Confirm latency targets on real meeting loopback audio
+- In-app profile / settings UI (API keys, model, debounce, translation) so users
+  do not need to edit `.env` and AppData folders by hand
+- Tag and ship Windows zip as **0.3.0** after validation
 
 ## 0.2.0
 
