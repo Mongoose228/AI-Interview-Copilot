@@ -2,27 +2,38 @@
 
 ## Unreleased
 
-### Added
-
-- Bounded partial Whisper transcription for faster CPU feedback
-- Provisional and final transcripts update one stable card
-- Text-free latency and Whisper real-time-factor metrics in logs
-
 ### Changed
 
-- Defaults: 350 ms VAD silence, 400 ms LLM debounce
-- Default CPU model: `small.en` → `base.en`
+- Default / recommended STT path is local Whisper; Deepgram remains available but unused unless opted in (paid)
+- Dual-path enabled by default for Whisper: `tiny.en` provisional UI + `base.en` final
+- Dual-channel mic path wired: separate VAD, `speaker=candidate` (no LLM), suppress loopback while mic speaks
 
-### Docs
+### Planned follow-ups
 
-- Rewrote `PERFORMANCE_ROADMAP.md` to match shipped CPU profile and remaining validation
+- Live Meet/Zoom latency with local Whisper
+- Optional cloud STT later if needed
+- Show candidate mic transcripts in UI (currently STT runs but LLM path skips)
+## 0.3.0
 
-### Planned for 0.3.0
+### Added
 
-- Confirm latency targets on real meeting loopback audio
-- In-app profile / settings UI (API keys, model, debounce, translation) so users
-  do not need to edit `.env` and AppData folders by hand
-- Tag and ship Windows zip as **0.3.0** after validation
+- STT backend abstraction (`SttEngine`) with factory: `whisper` | `deepgram` | `groq`
+- Deepgram prerecorded + WebSocket streaming (Nova-3), keyterms from profile
+- Groq Whisper batch STT + failover wrapper (`STT_FALLBACK`)
+- Speculative dual-path (`STT_DUAL_PATH_ENABLED`): tiny local provisional + cloud final
+- Audio DSP: soxr resample, energy-based mono, normalize, light denoise
+- Dual-channel capture scaffold (`AUDIO_DUAL_CHANNEL` + mic device)
+- STT golden harness: `interview-copilot-cli stt-bench`
+- STT bake-off across available backends: `interview-copilot-cli stt-bakeoff`
+- Optional Soniox backend (`SONIOX_API_KEY`)
+- In-app Settings dialog (API keys via keyring when available), persisted audio device
+- Privacy banner updated for cloud STT providers
+- Windows SAPI TTS golden clips for local WER (no PII)
+### Changed
+
+- Default `AUDIO_CHUNK_MS=20`, `LLM_DEBOUNCE_DELAY_S=0.25`
+- Cloud streaming disables Whisper-style VAD partial re-transcription
+- Cloud endpointing mode: Deepgram owns utterance finals; Silero remains speaking gate
 
 ## 0.2.0
 

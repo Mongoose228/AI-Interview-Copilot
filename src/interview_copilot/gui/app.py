@@ -15,7 +15,10 @@ from .signals import PipelineSignals
 def start_gui(device_id: str | None = None):
     """Entry point for the GUI app."""
     from ..config import config
-    device_id = device_id or config.AUDIO_DEVICE
+    from ..settings_store import apply_prefs_to_config
+
+    apply_prefs_to_config()
+    device_id = device_id or CopilotMainWindow.load_persisted_device() or config.AUDIO_DEVICE
 
     app = QApplication(sys.argv)
 

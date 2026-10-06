@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "sample_rate": 16000,
+  "notes": "Prefer Windows SAPI TTS clips for local WER. Replace with real Zoom/Meet loopback for production validation. Do not commit PII.",
+  "clips": [
+    {
+      "id": "silence_01",
+      "audio": "silence_01.wav",
+      "reference": "",
+      "tags": [
+        "silence"
+      ]
+    },
+    {
+      "id": "tech_terms_01",
+      "audio": "tech_terms_01.wav",
+      "reference": "Explain Kubernetes PostgreSQL idempotency and Redis caching.",
+      "tags": [
+        "tech",
+        "short",
+        "tts"
+      ]
+    },
+    {
+      "id": "tech_terms_02",
+      "audio": "tech_terms_02.wav",
+      "reference": "How do you design a rate limiter with Redis and idempotent APIs?",
+      "tags": [
+        "tech",
+        "short",
+        "tts"
+      ]
+    },
+    {
+      "id": "long_q_01",
+      "audio": "long_q_01.wav",
+      "reference": "Walk me through debugging a production outage involving Kubernetes pods and a PostgreSQL connection pool.",
+      "tags": [
+        "tech",
+        "long",
+        "tts"
+      ]
+    },
+    {
+      "id": "filler_01",
+      "audio": "filler_01.wav",
+      "reference": "um",
+      "tags": [
+        "filler",
+        "tts"
+      ]
+    }
+  ]
+}

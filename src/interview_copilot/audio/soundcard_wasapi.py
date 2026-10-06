@@ -103,11 +103,19 @@ class SoundCardWASAPIBackend(AudioCaptureBackend):
                 raise RuntimeError("Capture stopped") from None
             raise
 
+        arr = data.astype(np.float32)
+        channels = 2 if arr.ndim == 2 else 1
+        if config.DSP_ENABLED:
+            from .dsp import process_chunk_audio
+
+            arr, sample_rate = process_chunk_audio(arr, sample_rate)
+            channels = 1
+
         return AudioChunk(
             id=uuid.uuid4(),
-            data=data.astype(np.float32),
+            data=arr,
             sample_rate=sample_rate,
-            channels=2,
+            channels=channels,
             captured_at=time.time(),
         )
 

@@ -17,6 +17,9 @@ hiddenimports = [
     "httpx",
     "pydantic",
     "pydantic_settings",
+    "soxr",
+    "websocket",
+    "keyring",
 ]
 
 tmp_ret = collect_all("faster_whisper")

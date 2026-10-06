@@ -6,7 +6,7 @@ import numpy as np
 from interview_copilot.audio.soundcard_wasapi import SoundCardWASAPIBackend
 from interview_copilot.config import config
 from interview_copilot.pipeline import InterviewPipeline
-from interview_copilot.stt.whisper_engine import WhisperEngine
+from interview_copilot.stt.factory import build_stt_engine
 from interview_copilot.vad.silero import SileroVAD
 
 
@@ -94,11 +94,14 @@ def cmd_transcribe_test(args):
     """Test full audio capture -> VAD -> STT pipeline."""
     backend = SoundCardWASAPIBackend()
     vad = SileroVAD()
-    stt = WhisperEngine()
+    stt = build_stt_engine()
 
     device_id = args.device or config.AUDIO_DEVICE
 
-    print("Starting STT test... Speak English into the loopback. Press Ctrl+C to stop.")
+    print(
+        f"Starting STT test (backend={config.STT_BACKEND})... "
+        "Speak English into the loopback. Press Ctrl+C to stop."
+    )
     try:
         backend.start(device_id=device_id)
         while True:
@@ -123,6 +126,54 @@ def cmd_transcribe_test(args):
         sys.exit(1)
     finally:
         backend.stop()
+
+
+def cmd_stt_bench(args):
+    """Run golden-set STT harness (WER / latency)."""
+    import json
+    from pathlib import Path
+
+    from interview_copilot.eval.harness import DEFAULT_GOLDEN, run_harness
+    from interview_copilot.stt.deepgram import DeepgramEngine
+    from interview_copilot.stt.groq_engine import GroqWhisperEngine
+    from interview_copilot.stt.soniox import SonioxEngine
+    from interview_copilot.stt.whisper_engine import WhisperEngine
+
+    backend = (args.backend or config.STT_BACKEND or "whisper").lower()
+    if backend == "deepgram":
+        engine = DeepgramEngine()
+    elif backend == "groq":
+        engine = GroqWhisperEngine()
+    elif backend == "soniox":
+        engine = SonioxEngine()
+    else:
+        engine = WhisperEngine()
+
+    if not engine.is_available:
+        print(f"STT backend '{backend}' is not available (missing key/model).")
+        sys.exit(1)
+
+    golden = Path(args.golden) if args.golden else DEFAULT_GOLDEN
+    report = run_harness(engine, golden_dir=golden)
+    print(json.dumps(report, indent=2))
+    if args.out:
+        Path(args.out).write_text(json.dumps(report, indent=2), encoding="utf-8")
+        print(f"Wrote {args.out}")
+
+
+def cmd_stt_bakeoff(args):
+    """Compare available STT backends on the golden set."""
+    import json
+    from pathlib import Path
+
+    from interview_copilot.eval.bakeoff import write_bakeoff
+    from interview_copilot.eval.harness import DEFAULT_GOLDEN
+
+    golden = Path(args.golden) if args.golden else DEFAULT_GOLDEN
+    out = Path(args.out) if args.out else Path("bench_bakeoff.json")
+    result = write_bakeoff(out, golden_dir=golden)
+    print(json.dumps({"ranking": result["ranking"]}, indent=2))
+    print(f"Wrote {out}")
 
 
 def cmd_run(args):
@@ -209,10 +260,29 @@ def main():
 
     # transcribe-test command
     parser_stt = subparsers.add_parser(
-        "transcribe-test", help="Test audio capture + VAD + Whisper STT"
+        "transcribe-test", help="Test audio capture + VAD + STT"
     )
     parser_stt.add_argument("--device", type=str, help="Device ID to use (default: auto)")
     parser_stt.set_defaults(func=cmd_transcribe_test)
+
+    parser_bench = subparsers.add_parser(
+        "stt-bench", help="Run golden-set STT WER/latency harness"
+    )
+    parser_bench.add_argument(
+        "--backend", type=str, default=None, help="whisper|deepgram|groq|soniox"
+    )
+    parser_bench.add_argument("--golden", type=str, default=None, help="Golden set dir")
+    parser_bench.add_argument("--out", type=str, default=None, help="Write JSON report")
+    parser_bench.set_defaults(func=cmd_stt_bench)
+
+    parser_bake = subparsers.add_parser(
+        "stt-bakeoff", help="Compare available STT backends on golden set"
+    )
+    parser_bake.add_argument("--golden", type=str, default=None, help="Golden set dir")
+    parser_bake.add_argument(
+        "--out", type=str, default="bench_bakeoff.json", help="Write JSON report"
+    )
+    parser_bake.set_defaults(func=cmd_stt_bakeoff)
 
     # run command
     parser_run = subparsers.add_parser("run", help="Run the full Interview Copilot (CLI mode)")

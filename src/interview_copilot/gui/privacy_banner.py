@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
 from ..logging_config import logger
 from ..paths import get_privacy_state_path
 
-_STATE_KEY = "privacy_accepted"
+_STATE_KEY = "privacy_accepted_v3"
 
 
 def _is_accepted() -> bool:
@@ -64,9 +64,11 @@ class PrivacyBanner(QFrame):
 
         lbl = QLabel(
             "⚠️ <b>Privacy Notice</b><br>"
-            "This app sends interview transcripts and your candidate profile "
-            "to <b>OpenRouter API</b> (cloud) to generate AI suggestions. "
-            "No data is stored on the server beyond the API call duration."
+            "By default, speech is transcribed <b>locally with Whisper</b> "
+            "(audio stays on your machine). "
+            "Suggestions send transcripts and your candidate profile to "
+            "<b>OpenRouter</b>. Optional paid STT (Deepgram / Groq / Soniox) "
+            "or DeepL translation only run if you enable them and add keys."
         )
         lbl.setWordWrap(True)
         lbl.setStyleSheet("color: #FFB74D; font-size: 12px;")

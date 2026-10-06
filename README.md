@@ -9,6 +9,7 @@ via OpenRouter.
 - **Windows 10 version 2004+** (for screen-capture exclusion of the overlay)
 - Python **3.11+**
 - OpenRouter API key (suggestions)
+- Optional later: Deepgram / Groq / Soniox (cloud STT — paid; not required)
 - Optional: DeepL API key (cloud translation)
 - Interview audio in **English** (`WHISPER_MODEL=base.en` by default)
 
@@ -34,9 +35,33 @@ App data lives under `%APPDATA%\interview_copilot\`:
 | `models\silero_vad.onnx` | VAD model (downloaded on first run) |
 | `logs\copilot.log` | Rotating file log |
 | `.copilot_state.json` | Active profile |
-| `window_state.json` | Overlay geometry |
+| `window_state.json` | Overlay geometry + last audio device |
+| `user_prefs.json` | Non-secret prefs (secrets prefer OS keyring) |
 
 `.env` is loaded from CWD, then data-dir, then the project root (editable installs).
+
+## Speech-to-text backends
+
+Default is **local Whisper** (`STT_BACKEND=whisper`) — free, offline audio.
+Cloud backends stay in the app for later; do not enable them unless you want to pay.
+
+| `STT_BACKEND` | Notes |
+|---------------|--------|
+| `whisper` (**default**) | Local faster-whisper; $0; recommended now |
+| `deepgram` | Streaming Nova-3 (paid); optional later |
+| `groq` | Cloud Whisper via Groq; optional |
+| `soniox` | Cloud STT; optional |
+
+Set keys in `.env` or **Settings** only if you switch off Whisper.
+With Whisper, profile terms still help via `initial_prompt` when
+`STT_KEYTERMS_FROM_PROFILE=true`.
+
+Golden-set bench:
+
+```bash
+python scripts/generate_golden_audio.py
+interview-copilot-cli stt-bench --backend whisper
+```
 
 ## Run
 
@@ -104,14 +129,16 @@ PARTIAL_TRANSCRIPTION_MIN_AUDIO_MS=700
 real-time-factor metrics under `[Latency]` and `[STT]`.
 
 Details and acceptance targets: [PERFORMANCE_ROADMAP.md](PERFORMANCE_ROADMAP.md).
-Next product steps (settings UI, tagged 0.3.0): [CHANGELOG.md](CHANGELOG.md).
+See [CHANGELOG.md](CHANGELOG.md) for 0.3.0 STT upgrades.
 
 ## Privacy
 
-Transcripts and the candidate profile are **always** sent to OpenRouter when suggestions
-are enabled. `LOG_OBFUSCATION_ENABLED=true` only affects **local** logs (no transcript text).
+Transcripts/profile go to OpenRouter when suggestions are enabled.
+With default **local Whisper**, interview **audio stays on your machine**.
+Only if you later enable Deepgram/Groq/Soniox is audio sent to that provider.
+`LOG_OBFUSCATION_ENABLED=true` only affects **local** logs (no transcript text).
 
-A one-time banner explains this on first launch.
+A one-time banner explains this on first launch (and after privacy text updates).
 
 ## Troubleshooting
 

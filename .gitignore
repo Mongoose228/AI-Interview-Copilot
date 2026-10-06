@@ -19,8 +19,10 @@ venv.bak/
 # Audio & Logs
 *.wav
 *.mp3
+!testdata/stt_golden/*.wav
 *.log
 *.onnx
+bench_*.json
 
 # App state
 .copilot_state.json
@@ -40,3 +42,6 @@ Thumbs.db
 build/
 dist/
 *.egg-info/
+
+# Graphify generated knowledge graph (rebuild with `graphify update .`)
+graphify-out/

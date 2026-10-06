@@ -33,6 +33,7 @@ class SpeechPhrase:
     vad_end_at: float
     is_final: bool = True
     revision: int = 0
+    speaker: str = "interviewer"  # interviewer | candidate
 
 
 @dataclass(frozen=True)
@@ -42,7 +43,7 @@ class Transcript:
     language: str
     confidence: float
     stt_duration_s: float
-    speaker: str = "interviewer"  # reserved for future diarization
+    speaker: str = "interviewer"  # interviewer | candidate (mic dual-channel)
     stt_started_at: float = 0.0
     stt_ended_at: float = 0.0
     is_final: bool = True

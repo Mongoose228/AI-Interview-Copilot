@@ -24,11 +24,12 @@ _ONNX_URL = "https://github.com/snakers4/silero-vad/raw/v4.0/files/silero_vad.on
 
 
 class SileroVAD:
-    def __init__(self):
+    def __init__(self, *, speaker: str = "interviewer"):
         self._vad_lib_available = False
         self._session = None
         self._h = None
         self._c = None
+        self.speaker = speaker
 
         try:
             import onnxruntime as ort
@@ -185,6 +186,7 @@ class SileroVAD:
             vad_end_at=ended_at,
             is_final=is_final,
             revision=revision,
+            speaker=self.speaker,
         )
 
     def get_partial_snapshot(self) -> SpeechPhrase | None:

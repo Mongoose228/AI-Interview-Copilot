@@ -24,6 +24,28 @@ class Settings(BaseSettings):
     NETWORK_READ_TIMEOUT: int = 30
     MAX_LLM_TOKENS: int = 250
 
+    # STT backend selection
+    STT_BACKEND: Literal["whisper", "deepgram", "groq", "soniox"] = "whisper"
+    STT_FALLBACK: Literal["whisper", "deepgram", "groq", "soniox", "none"] = "whisper"
+    STT_KEYTERMS_FROM_PROFILE: bool = True
+    STT_DUAL_PATH_ENABLED: bool = True
+    STT_PROVISIONAL_MODEL: str = "tiny.en"
+    # When using cloud streaming, prefer Deepgram utterance boundaries over Silero cuts.
+    STT_CLOUD_ENDPOINTING: bool = True
+
+    DEEPGRAM_API_KEY: str | None = None
+    DEEPGRAM_MODEL: str = "nova-3"
+    DEEPGRAM_LANGUAGE: str = "en"
+    DEEPGRAM_ENDPOINTING_MS: int = 300
+    DEEPGRAM_UTTERANCE_END_MS: int = 1000
+
+    GROQ_API_KEY: str | None = None
+    GROQ_BASE_URL: str = "https://api.groq.com/openai/v1"
+    GROQ_WHISPER_MODEL: str = "whisper-large-v3-turbo"
+
+    SONIOX_API_KEY: str | None = None
+    SONIOX_MODEL: str = "stt-rt-preview"
+
     # Whisper Settings
     WHISPER_MODEL: str = "base.en"
     WHISPER_DEVICE: str = "auto"
@@ -33,8 +55,20 @@ class Settings(BaseSettings):
 
     # Audio Settings
     AUDIO_DEVICE: str | None = None
+    AUDIO_MIC_DEVICE: str | None = None
+    AUDIO_DUAL_CHANNEL: bool = False
+    # When mic VAD detects the candidate speaking, skip loopback STT enqueue
+    # so your own voice (echoed from speakers) does not become "interviewer" text.
+    AUDIO_SUPPRESS_LOOPBACK_WHILE_MIC: bool = True
     AUDIO_SAMPLE_RATE: int = 16000
-    AUDIO_CHUNK_MS: int = 30
+    AUDIO_CHUNK_MS: int = 20
+
+    # DSP
+    DSP_ENABLED: bool = True
+    DSP_MONO_MODE: Literal["energy", "mean", "left", "right"] = "energy"
+    DSP_NORMALIZE_ENABLED: bool = True
+    DSP_DENOISE_ENABLED: bool = True
+    DSP_TARGET_PEAK: float = 0.9
 
     # VAD Settings
     VAD_THRESHOLD: float = 0.5
@@ -44,7 +78,8 @@ class Settings(BaseSettings):
     VAD_MAX_PHRASE_SECONDS: int = 12
 
     # Debounce: seconds of silence after last transcript before sending to LLM.
-    LLM_DEBOUNCE_DELAY_S: float = 0.4
+    # Lower default when using fast cloud STT; raise for Whisper-only CPU.
+    LLM_DEBOUNCE_DELAY_S: float = 0.25
 
     # Partial STT settings (bounded to one in-flight CPU inference)
     PARTIAL_TRANSCRIPTION_ENABLED: bool = True

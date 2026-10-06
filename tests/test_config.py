@@ -21,10 +21,16 @@ def test_default_config(monkeypatch):
     assert config.VAD_SILENCE_MS == 350
     assert config.WHISPER_BEAM_SIZE == 1
     assert config.WHISPER_CPU_THREADS == 4
-    assert config.LLM_DEBOUNCE_DELAY_S == 0.4
+    assert config.LLM_DEBOUNCE_DELAY_S == 0.25
+    assert config.AUDIO_CHUNK_MS == 20
+    assert config.STT_BACKEND == "whisper"
+    assert config.STT_DUAL_PATH_ENABLED is True
+    assert config.STT_PROVISIONAL_MODEL == "tiny.en"
+    assert config.AUDIO_SUPPRESS_LOOPBACK_WHILE_MIC is True
     assert config.PARTIAL_TRANSCRIPTION_ENABLED is True
     assert config.PARTIAL_TRANSCRIPTION_INTERVAL_MS == 800
     assert config.PARTIAL_TRANSCRIPTION_MIN_AUDIO_MS == 700
+    assert config.DSP_ENABLED is True
 
 
 def test_custom_config(monkeypatch):

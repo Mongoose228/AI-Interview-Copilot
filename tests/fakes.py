@@ -13,6 +13,7 @@ from interview_copilot.models import (
     Transcript,
 )
 from interview_copilot.translation.base import Translator
+from interview_copilot.stt.base import SttEngine
 
 
 class FakeAudioCapture(AudioCaptureBackend):
@@ -79,7 +80,7 @@ class FakeTranslator(Translator):
         return f"[translated_to_{target_lang}] {text}"
 
 
-class FakeWhisperEngine:
+class FakeWhisperEngine(SttEngine):
     def __init__(self, fake_text="fake transcription"):
         self.fake_text = fake_text
 
@@ -94,6 +95,7 @@ class FakeWhisperEngine:
             language="en",
             confidence=0.99,
             stt_duration_s=0.1,
+            speaker=getattr(phrase, "speaker", "interviewer"),
             stt_started_at=started,
             stt_ended_at=started + 0.1,
             is_final=phrase.is_final,

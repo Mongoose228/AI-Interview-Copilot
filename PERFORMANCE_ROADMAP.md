@@ -99,18 +99,37 @@ VRAM и стабильность с CPU `int8`.
 - real-time factor Whisper;
 - модель, устройство и compute type.
 
-Целевые значения (ещё нужно подтвердить на реальном loopback):
+Целевые значения (текущий путь — **local Whisper**):
 
-- транскрипт виден ≤ 1,5 с после конца короткого вопроса;
+- транскрипт виден ≤ 1,5 с после конца короткого вопроса (loopback);
 - первый AI-токен ≤ 2,5 с при нормальной сети;
-- вопросы не дробятся заметно чаще;
-- tech-термины приемлемы относительно `small.en`.
+- tech-термины улучшаются через `initial_prompt` из профиля.
+
+Опционально позже (платный cloud, не используем сейчас):
+
+- Deepgram streaming: interim ≤ 400–600 мс; final ≤ 700–900 мс.
+
+### Baseline table
+
+| Setup | Platform | mean latency | mean WER | Notes |
+|-------|----------|--------------|----------|-------|
+| whisper base.en CPU (**current**) | SAPI TTS golden | **~0.61 s** | **~0.49** | measured 2026-10-06; keep as default |
+| whisper base.en CPU | Zoom/Meet live | _TBD_ | _TBD_ | next real validation |
+| deepgram / groq / soniox | — | — | — | code ready; **not in use** until you opt in |
+
+Harness:
+
+```bash
+python scripts/generate_golden_audio.py
+interview-copilot-cli stt-bench --backend whisper --out bench_whisper.json
+interview-copilot-cli stt-bakeoff --out bench_bakeoff.json
+```
 
 ## Что осталось проверить
 
-1. Замерить latency на реальном meeting loopback (Zoom / Meet / Teams).
-2. Прогнать короткие и длинные технические вопросы.
-3. При высокой CPU-нагрузке увеличить `PARTIAL_TRANSCRIPTION_INTERVAL_MS`
-   (или отключить partial), не меняя число потоков.
+1. Latency на реальном Zoom / Meet / Teams с **локальным Whisper**.
+2. Тюнинг модели (`small.en` на GPU vs `base.en` на CPU) по harness.
+3. A/B denoise on/off на реальных клипах.
+4. Cloud STT — только если позже решите платить и смените `STT_BACKEND`.
 
-См. также следующий продуктовый шаг в `CHANGELOG.md` (планируемый 0.3.0).
+См. также `CHANGELOG.md` (0.3.0).

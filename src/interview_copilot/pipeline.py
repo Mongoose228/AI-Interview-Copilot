@@ -4,11 +4,15 @@ import threading
 import time
 from typing import Literal
 
+from .audio.dsp import float32_to_pcm16
+from .audio.dual_capture import DualAudioCapture
 from .audio.soundcard_wasapi import SoundCardWASAPIBackend
 from .config import config
 from .logging_config import log_sensitive, logger
 from .models import PipelineResult, StageTiming, SuggestionStatus, Transcript
-from .stt.whisper_engine import WhisperEngine
+from .stt.dual_path import DualPathSttEngine
+from .stt.factory import build_stt_engine
+from .stt.keyterms import build_initial_prompt, extract_keyterms
 from .suggestion.openrouter import OpenRouterSuggester
 from .suggestion.phrase_filter import is_filler
 from .suggestion.profile_manager import ProfileManager
@@ -31,13 +35,34 @@ class InterviewPipeline:
         suggester=None,
         profile_mgr=None,
     ):
-        self.audio = audio or SoundCardWASAPIBackend()
-        self.vad = vad or SileroVAD()
+        if audio is not None:
+            self.audio = audio
+        elif config.AUDIO_DUAL_CHANNEL:
+            self.audio = DualAudioCapture()
+        else:
+            self.audio = SoundCardWASAPIBackend()
+        self.vad = vad or SileroVAD(speaker="interviewer")
         self._vad_init_error = not self.vad.is_available
         if self._vad_init_error:
             logger.error("VAD model failed to load. Speech detection will not work.")
 
-        self.stt = stt or WhisperEngine()
+        # Second VAD for candidate mic when dual-channel capture is active.
+        self.mic_vad = SileroVAD(speaker="candidate") if config.AUDIO_DUAL_CHANNEL else None
+        self._mic_speaking_until = 0.0
+
+        self.stt = stt or build_stt_engine()
+        self._streaming_stt = bool(
+            getattr(self.stt, "supports_streaming", lambda: False)()
+            and self.stt.is_available
+            and config.STT_BACKEND in {"deepgram"}
+        )
+        # Cloud streaming owns utterance finals; disable Whisper-style VAD partials.
+        self._use_vad_partials = (
+            config.PARTIAL_TRANSCRIPTION_ENABLED and not self._streaming_stt
+        )
+        self._cloud_endpointing = bool(
+            self._streaming_stt and config.STT_CLOUD_ENDPOINTING
+        )
 
         if translator is ...:
             self.translator = None
@@ -144,7 +169,37 @@ class InterviewPipeline:
             if self._suggestions_disabled_reason == "no_profile":
                 if self.suggester.is_configured:
                     self._suggestions_disabled_reason = "none"
+        self._apply_profile_to_stt(snapshot.content)
         return True
+
+    def _apply_profile_to_stt(self, profile_text: str) -> None:
+        if not config.STT_KEYTERMS_FROM_PROFILE:
+            return
+        terms = extract_keyterms(profile_text)
+        prompt = build_initial_prompt(profile_text)
+        try:
+            self.stt.set_keyterms(terms)
+            self.stt.set_initial_prompt(prompt)
+            logger.info(f"[STT] applied {len(terms)} keyterms from profile")
+        except Exception as e:
+            logger.debug(f"Failed to apply STT keyterms: {e}")
+
+    def _on_streaming_transcript(self, transcript: Transcript) -> None:
+        if transcript.speaker == "candidate":
+            return
+        if (
+            (transcript.text_en or transcript.is_final)
+            and self._loop
+            and self.transcript_queue
+        ):
+            if transcript.is_final and transcript.speech_ended_at:
+                logger.info(
+                    "[Latency] speech_end_to_final_stt_ready="
+                    f"{max(0.0, transcript.stt_ended_at - transcript.speech_ended_at):.3f}s"
+                )
+            self._loop.call_soon_threadsafe(
+                self.transcript_queue.put_nowait, transcript
+            )
 
     def clear_history(self):
         self.transcript_history.clear()
@@ -172,6 +227,38 @@ class InterviewPipeline:
             logger.warning(f"Error stopping audio for device change: {e}")
         self._restart_capture.set()
 
+    def _process_mic_chunks(self) -> bool:
+        """
+        Drain candidate mic audio into a separate VAD.
+        Returns True while the candidate is speaking (or briefly after),
+        so loopback STT/LLM can be suppressed against speaker echo.
+        """
+        if self.mic_vad is None or not isinstance(self.audio, DualAudioCapture):
+            return time.time() < self._mic_speaking_until
+
+        try:
+            mic_chunks = self.audio.drain_mic_chunks()
+        except Exception as e:
+            logger.debug(f"drain_mic_chunks failed: {e}")
+            return time.time() < self._mic_speaking_until
+
+        for mic_chunk in mic_chunks:
+            try:
+                mic_phrases = self.mic_vad.process_chunk(mic_chunk)
+            except Exception as e:
+                logger.debug(f"Mic VAD error: {e}")
+                continue
+            for p in mic_phrases:
+                self._enqueue_final(p)
+            if self.mic_vad.is_speaking or mic_phrases:
+                # Hold suppress a bit after speech so loopback echo dies out.
+                self._mic_speaking_until = time.time() + 0.45
+
+        if self.mic_vad.is_speaking:
+            self._mic_speaking_until = max(self._mic_speaking_until, time.time() + 0.15)
+
+        return time.time() < self._mic_speaking_until
+
     def _capture_and_vad_worker(self, device_id: str | None = None):
         logger.info("Audio capture thread started.")
         if self._vad_init_error:
@@ -194,8 +281,20 @@ class InterviewPipeline:
                 current_device = self._device_id
                 self.audio.start(current_device)
                 self.vad.reset()
+                if self.mic_vad is not None:
+                    self.mic_vad.reset()
+                self._mic_speaking_until = 0.0
                 retries = 0
                 self._restart_capture.clear()
+
+                if self._streaming_stt:
+                    try:
+                        self.stt.start_stream(self._on_streaming_transcript)
+                    except Exception as e:
+                        logger.error(f"Failed to start STT stream: {e}")
+                        self._streaming_stt = False
+                        self._use_vad_partials = config.PARTIAL_TRANSCRIPTION_ENABLED
+                        self._cloud_endpointing = False
 
                 if self._audio_status_callback:
                     self._audio_status_callback(True, "Audio capture active")
@@ -213,18 +312,59 @@ class InterviewPipeline:
                             break
                         raise
 
+                    # Candidate mic path: VAD + optional STT (LLM skipped in orchestrator).
+                    mic_speaking = self._process_mic_chunks()
+
+                    # Feed cloud streaming STT (PCM16 @ 16 kHz mono) — loopback only.
+                    if self._streaming_stt and not mic_speaking:
+                        try:
+                            pcm = float32_to_pcm16(chunk.data.reshape(-1))
+                            self.stt.feed_audio(pcm, chunk.sample_rate)
+                        except Exception as e:
+                            logger.debug(f"STT feed_audio error: {e}")
+
                     phrases = self.vad.process_chunk(chunk)
-                    for p in phrases:
-                        self._enqueue_final(p)
+                    if not self._cloud_endpointing:
+                        for p in phrases:
+                            if mic_speaking and config.AUDIO_SUPPRESS_LOOPBACK_WHILE_MIC:
+                                logger.debug(
+                                    "Suppressing loopback phrase while candidate mic active"
+                                )
+                                continue
+                            self._enqueue_final(p)
+                    elif phrases and isinstance(self.stt, DualPathSttEngine):
+                        # Still allow local provisional while cloud owns finals.
+                        pass
 
                     if (
-                        config.PARTIAL_TRANSCRIPTION_ENABLED
+                        self._use_vad_partials
+                        and not mic_speaking
                         and not self._stt_busy.is_set()
                         and self.phrase_queue.empty()
                     ):
                         partial = self.vad.get_partial_snapshot()
                         if partial:
-                            self._enqueue_partial(partial)
+                            if isinstance(self.stt, DualPathSttEngine):
+                                prov = self.stt.maybe_provisional(partial)
+                                if prov and self._loop and self.transcript_queue:
+                                    self._loop.call_soon_threadsafe(
+                                        self.transcript_queue.put_nowait, prov
+                                    )
+                            else:
+                                self._enqueue_partial(partial)
+                    elif (
+                        self._streaming_stt
+                        and not mic_speaking
+                        and isinstance(self.stt, DualPathSttEngine)
+                        and not self._stt_busy.is_set()
+                    ):
+                        partial = self.vad.get_partial_snapshot()
+                        if partial:
+                            prov = self.stt.maybe_provisional(partial)
+                            if prov and self._loop and self.transcript_queue:
+                                self._loop.call_soon_threadsafe(
+                                    self.transcript_queue.put_nowait, prov
+                                )
 
             except (RuntimeError, ValueError, TypeError, OSError) as e:
                 if self._stop_event.is_set() or self._pause_event.is_set():
@@ -266,6 +406,11 @@ class InterviewPipeline:
                 self._stop_event.wait(delay)
 
             finally:
+                if self._streaming_stt:
+                    try:
+                        self.stt.close_stream()
+                    except Exception as e:
+                        logger.debug(f"STT close_stream: {e}")
                 try:
                     self.audio.stop()
                 except (RuntimeError, ValueError, TypeError) as stop_err:
@@ -639,6 +784,10 @@ class InterviewPipeline:
                 logger.error(f"Orchestrator queue error: {e}")
                 continue
 
+            # Dual-channel: never send candidate mic speech to the LLM path.
+            if getattr(transcript, "speaker", "interviewer") == "candidate":
+                continue
+
             try:
                 if transcript.is_final and (
                     not transcript.text_en or not transcript.text_en.strip()
@@ -812,6 +961,14 @@ class InterviewPipeline:
         self._loop = asyncio.get_running_loop()
         self.transcript_queue = asyncio.Queue()
 
+        # Load profile for keyterms before capture starts.
+        with self._profile_lock:
+            if self._active_profile is None:
+                self._active_profile = self.profile_mgr.load_active_profile()
+            profile = self._active_profile
+        if profile:
+            self._apply_profile_to_stt(profile.content)
+
         t_cap = threading.Thread(
             target=self._capture_and_vad_worker, args=(device_id,), daemon=True
         )
@@ -832,10 +989,16 @@ class InterviewPipeline:
         self._stop_event.set()
         self._pause_event.clear()
 
+        try:
+            if self._streaming_stt:
+                self.stt.close_stream()
+        except Exception as e:
+            logger.debug(f"STT close_stream during stop: {e}")
+
         # Flush any in-progress speech before tearing down audio
         try:
             flushed = self.vad.flush()
-            if flushed:
+            if flushed and not self._cloud_endpointing:
                 try:
                     self.phrase_queue.put_nowait(flushed)
                 except queue.Full:

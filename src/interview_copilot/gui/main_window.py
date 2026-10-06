@@ -274,6 +274,12 @@ class CopilotMainWindow(QMainWindow):
         self.device_combo.setStyleSheet(self._combo_style())
         controls.addWidget(QLabel("Device:"))
         controls.addWidget(self.device_combo, 1)
+
+        self.settings_btn = QPushButton("Settings")
+        self.settings_btn.setFixedHeight(28)
+        self.settings_btn.setStyleSheet(self._btn_style())
+        self.settings_btn.clicked.connect(self._open_settings)
+        controls.addWidget(self.settings_btn)
         self.main_layout.addLayout(controls)
 
         self.privacy_banner = PrivacyBanner()
@@ -449,8 +455,42 @@ class CopilotMainWindow(QMainWindow):
             self.on_profile_changed(name)
 
     def _device_changed(self, index: int):
+        device_id = self.device_combo.itemData(index)
+        self._persist_device(device_id)
         if self.on_device_changed:
-            self.on_device_changed(self.device_combo.itemData(index))
+            self.on_device_changed(device_id)
+
+    def _open_settings(self):
+        from .settings_dialog import SettingsDialog
+
+        dlg = SettingsDialog(self)
+        dlg.exec()
+
+    @staticmethod
+    def _persist_device(device_id: str | None) -> None:
+        path = get_window_state_path()
+        data = {}
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+        data["audio_device"] = device_id
+        try:
+            path.write_text(json.dumps(data), encoding="utf-8")
+        except Exception:
+            pass
+
+    @staticmethod
+    def load_persisted_device() -> str | None:
+        path = get_window_state_path()
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data.get("audio_device")
+        except Exception:
+            return None
 
     def _on_pause_clicked(self):
         self._paused = not self._paused
@@ -549,11 +589,15 @@ class CopilotMainWindow(QMainWindow):
     def save_geometry(self):
         path = get_window_state_path()
         try:
+            data = {}
+            if path.exists():
+                try:
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                except Exception:
+                    data = {}
             g = self.geometry()
-            path.write_text(
-                json.dumps({"geometry": {"x": g.x(), "y": g.y(), "w": g.width(), "h": g.height()}}),
-                encoding="utf-8",
-            )
+            data["geometry"] = {"x": g.x(), "y": g.y(), "w": g.width(), "h": g.height()}
+            path.write_text(json.dumps(data), encoding="utf-8")
         except Exception:
             pass
 
