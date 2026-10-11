@@ -12,8 +12,8 @@ from interview_copilot.models import (
     SuggestionResult,
     Transcript,
 )
-from interview_copilot.translation.base import Translator
 from interview_copilot.stt.base import SttEngine
+from interview_copilot.translation.base import Translator
 
 
 class FakeAudioCapture(AudioCaptureBackend):

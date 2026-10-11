@@ -3,29 +3,42 @@ import html
 import json
 import sys
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, QTimer
+from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QDialog,
     QFrame,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMenu,
     QPushButton,
     QScrollArea,
     QSizeGrip,
+    QStyle,
+    QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
 )
 
+from ..logging_config import logger
 from ..models import PipelineResult, SuggestionStatus
 from ..paths import get_window_state_path
+from . import theme
 from .privacy_banner import PrivacyBanner
 
 _MAX_RESULT_CARDS = 50
 _TRANSIENT_MS = 7000
+_PROFILE_PLACEHOLDER = "— select profile —"
 WDA_EXCLUDEFROMCAPTURE = 0x00000011
+_HOTKEY_ID = 0xC0B1
+_MOD_CONTROL = 0x0002
+_MOD_SHIFT = 0x0004
+_MOD_NOREPEAT = 0x4000
+_WM_HOTKEY = 0x0312
 
 
 def _esc(text: str) -> str:
@@ -38,101 +51,113 @@ class ResultWidget(QFrame):
     def __init__(self, result: PipelineResult, parent=None):
         super().__init__(parent)
         self.phrase_id = result.id
-        self.setStyleSheet("""
-            ResultWidget {
-                background-color: rgba(40, 40, 40, 0.4);
-                border-radius: 10px;
-                border: 1px solid rgba(80, 80, 80, 0.3);
-                margin-bottom: 10px;
-            }
-            QLabel {
-                background: transparent;
-            }
-        """)
+        self.setObjectName("ResultWidget")
+        self.setStyleSheet(theme.result_card_style())
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setContentsMargins(14, 12, 14, 10)
         layout.setSpacing(6)
 
         self.lbl_en = QLabel()
         self.lbl_en.setWordWrap(True)
+        self.lbl_en.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(self.lbl_en)
 
         self.lbl_ru = QLabel("")
         self.lbl_ru.setWordWrap(True)
-        self.lbl_ru.setStyleSheet("color: #90CAF9; font-size: 13px;")
+        self.lbl_ru.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.lbl_ru.setStyleSheet(f"color: {theme.TEXT_RU}; font-size: 12px;")
         self.lbl_ru.setVisible(False)
         layout.addWidget(self.lbl_ru)
 
         self.line = QFrame()
         self.line.setFrameShape(QFrame.HLine)
-        self.line.setFrameShadow(QFrame.Sunken)
-        self.line.setStyleSheet("background-color: rgba(100, 100, 100, 0.5);")
+        self.line.setStyleSheet(theme.divider_style())
         layout.addWidget(self.line)
 
-        self.lbl_ai = QLabel("🤔 <i>Thinking...</i>")
+        self.lbl_ai = QLabel("<i>Thinking...</i>")
         self.lbl_ai.setWordWrap(True)
-        self.lbl_ai.setStyleSheet("color: #888888; font-size: 13px; font-style: italic;")
+        self.lbl_ai.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.lbl_ai.setStyleSheet(
+            f"color: {theme.TEXT_MUTED}; font-size: 13px; font-style: italic;"
+        )
         layout.addWidget(self.lbl_ai)
 
         self.lbl_ai_ru = QLabel("")
         self.lbl_ai_ru.setWordWrap(True)
-        self.lbl_ai_ru.setStyleSheet("color: #81C784; font-size: 14px;")
+        self.lbl_ai_ru.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.lbl_ai_ru.setStyleSheet(f"color: {theme.TEXT_AI_RU}; font-size: 13px;")
         self.lbl_ai_ru.setVisible(False)
         layout.addWidget(self.lbl_ai_ru)
 
         btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(0, 2, 0, 0)
         btn_row.addStretch()
         self.copy_btn = QPushButton("Copy")
-        self.copy_btn.setFixedWidth(60)
-        self.copy_btn.setStyleSheet("""
-            QPushButton {
-                background-color: rgba(255,255,255,0.08);
-                color: #AAAAAA;
-                border: none;
-                border-radius: 4px;
-                padding: 2px 6px;
-                font-size: 11px;
-            }
-            QPushButton:hover { color: #FFFFFF; background-color: rgba(255,255,255,0.15); }
-        """)
+        self.copy_btn.setFixedHeight(24)
+        self.copy_btn.setCursor(Qt.PointingHandCursor)
+        self.copy_btn.setToolTip("Copy suggestion to clipboard")
+        self.copy_btn.setStyleSheet(theme.copy_button_style())
         self.copy_btn.clicked.connect(self._copy_suggestion)
+        self.copy_btn.setVisible(False)
         btn_row.addWidget(self.copy_btn)
         layout.addLayout(btn_row)
 
         self.current_suggestion_text = ""
         self.update_transcript(result)
+        self._fade_in()
+
+    def _fade_in(self) -> None:
+        effect = QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(effect)
+        anim = QPropertyAnimation(effect, b"opacity", self)
+        anim.setDuration(220)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+        # A lingering effect forces offscreen rendering of every card on repaint.
+        anim.finished.connect(lambda: self.setGraphicsEffect(None))
+        anim.start()
+        self._fade_anim = anim
+
+    def _set_ai_text(self, body: str, *, suffix: str = "") -> None:
+        self.lbl_ai.setText(f"{theme.tag_html('AI', theme.ACCENT)}{suffix}&nbsp; {body}")
 
     def update_transcript(self, result: PipelineResult):
         """Update provisional/final transcript without replacing the card."""
-        self.lbl_en.setText(f"🎙️ <b>EN:</b> {_esc(result.transcript)}")
+        self.lbl_en.setText(f"{theme.tag_html('EN')}&nbsp; {_esc(result.transcript)}")
         if result.is_provisional:
             self.lbl_en.setStyleSheet(
-                "color: #999999; font-size: 13px; font-style: italic;"
+                f"color: {theme.TEXT_PROVISIONAL}; font-size: 13px; font-style: italic;"
             )
             if not self.current_suggestion_text:
-                self.lbl_ai.setText("🎧 <i>Listening...</i>")
+                self.lbl_ai.setText("<i>Listening...</i>")
                 self.lbl_ai.setStyleSheet(
-                    "color: #777777; font-size: 13px; font-style: italic;"
+                    f"color: {theme.TEXT_MUTED}; font-size: 13px; font-style: italic;"
                 )
         else:
-            self.lbl_en.setStyleSheet("color: #CCCCCC; font-size: 13px;")
+            self.lbl_en.setStyleSheet(f"color: {theme.TEXT_SECONDARY}; font-size: 13px;")
             if not self.current_suggestion_text:
-                self.lbl_ai.setText("🤔 <i>Thinking...</i>")
+                self.lbl_ai.setText("<i>Thinking...</i>")
                 self.lbl_ai.setStyleSheet(
-                    "color: #888888; font-size: 13px; font-style: italic;"
+                    f"color: {theme.TEXT_MUTED}; font-size: 13px; font-style: italic;"
                 )
 
     def _copy_suggestion(self):
         if self.current_suggestion_text:
             QApplication.clipboard().setText(self.current_suggestion_text)
+            self.copy_btn.setText("Copied")
+            QTimer.singleShot(1200, lambda: self.copy_btn.setText("Copy"))
 
     def append_token(self, token: str):
         if not self.current_suggestion_text:
-            self.lbl_ai.setStyleSheet("color: #4CAF50; font-size: 15px; font-weight: bold;")
+            self.lbl_ai.setStyleSheet(
+                f"color: {theme.TEXT_AI_BOLD}; font-size: 14px; font-weight: 600;"
+            )
         self.current_suggestion_text += token
         formatted_text = _esc(self.current_suggestion_text).replace("\n", "<br>")
-        self.lbl_ai.setText(f"💡 <b>AI:</b> {formatted_text}")
+        self._set_ai_text(formatted_text)
+        self.copy_btn.setVisible(True)
 
     def update_suggestion(self, result: PipelineResult):
         status = getattr(result, "suggestion_status", SuggestionStatus.PENDING)
@@ -144,54 +169,65 @@ class ResultWidget(QFrame):
         ):
             formatted = _esc(self.current_suggestion_text).replace("\n", "<br>")
             suffix = " <i>(interrupted)</i>" if self.current_suggestion_text else ""
-            self.lbl_ai.setText(f"💡 <b>AI:</b> {formatted}{suffix}")
-            self.lbl_ai.setStyleSheet("color: #FFB74D; font-size: 14px;")
+            self._set_ai_text(f"{formatted}{suffix}")
+            self.lbl_ai.setStyleSheet(f"color: {theme.TEXT_WARN}; font-size: 13px;")
             return
 
         if status == SuggestionStatus.CANCELLED or is_cancelled:
-            self.lbl_ai.setText("⏸️ <i>Skipped (new question)</i>")
+            self.lbl_ai.setText("<i>Skipped (new question)</i>")
             self.lbl_ai.setStyleSheet(
-                "color: #888888; font-size: 13px; font-style: italic;"
-                " border: 1px solid rgba(136, 136, 136, 0.3);"
-                " padding: 4px; border-radius: 4px;"
+                f"color: {theme.TEXT_MUTED}; font-size: 12px; font-style: italic;"
+                f" border: 1px solid {theme.BORDER_SUBTLE};"
+                f" padding: 4px 6px; border-radius: {theme.RADIUS_SM};"
             )
             return
 
         if status == SuggestionStatus.SKIPPED_NO_KEY:
-            self.lbl_ai.setText("🔑 <i>Suggestions disabled — set OPENROUTER_API_KEY</i>")
-            self.lbl_ai.setStyleSheet("color: #FFB74D; font-size: 13px; font-style: italic;")
+            self.lbl_ai.setText(
+                "<i>Suggestions disabled — set OPENROUTER_API_KEY</i>"
+            )
+            self.lbl_ai.setStyleSheet(
+                f"color: {theme.TEXT_WARN}; font-size: 12px; font-style: italic;"
+            )
             return
 
         if status == SuggestionStatus.SKIPPED_NO_PROFILE:
-            self.lbl_ai.setText("📄 <i>Suggestions disabled — create a candidate profile</i>")
-            self.lbl_ai.setStyleSheet("color: #FFB74D; font-size: 13px; font-style: italic;")
+            self.lbl_ai.setText(
+                "<i>Suggestions disabled — create a candidate profile</i>"
+            )
+            self.lbl_ai.setStyleSheet(
+                f"color: {theme.TEXT_WARN}; font-size: 12px; font-style: italic;"
+            )
             return
 
         if not suggestion or status == SuggestionStatus.FAILED:
-            self.lbl_ai.setText("❌ <i>Suggestion failed.</i>")
+            self.lbl_ai.setText("<i>Suggestion failed.</i>")
             self.lbl_ai.setStyleSheet(
-                "color: #F44336; font-size: 13px; font-style: italic;"
-                " border: 1px solid rgba(244, 67, 54, 0.5);"
-                " padding: 4px; border-radius: 4px;"
+                f"color: {theme.TEXT_ERROR}; font-size: 12px; font-style: italic;"
+                f" border: 1px solid rgba(232, 106, 93, 0.45);"
+                f" padding: 4px 6px; border-radius: {theme.RADIUS_SM};"
             )
             return
 
         text = suggestion.answer_en
-        icon = " ⚠️" if suggestion.has_hedging else ""
+        hedge = " " + theme.tag_html("hedged", theme.TEXT_WARN)
         self.current_suggestion_text = text
         formatted_text = _esc(text).replace("\n", "<br>")
-        self.lbl_ai.setStyleSheet("color: #4CAF50; font-size: 15px; font-weight: bold;")
-        self.lbl_ai.setText(f"💡 <b>AI{icon}:</b> {formatted_text}")
+        self.lbl_ai.setStyleSheet(
+            f"color: {theme.TEXT_AI_BOLD}; font-size: 14px; font-weight: 600;"
+        )
+        self._set_ai_text(formatted_text, suffix=hedge if suggestion.has_hedging else "")
+        self.copy_btn.setVisible(bool(text))
 
     def set_translation(self, translation_ru: str):
         if translation_ru:
-            self.lbl_ru.setText(f"🇷🇺 <b>RU:</b> {_esc(translation_ru)}")
+            self.lbl_ru.setText(f"{theme.tag_html('RU')}&nbsp; {_esc(translation_ru)}")
             self.lbl_ru.setVisible(True)
 
     def set_answer_ru(self, answer_ru: str):
         if answer_ru:
             formatted = _esc(answer_ru).replace("\n", "<br>")
-            self.lbl_ai_ru.setText(f"🇷🇺 <b>AI RU:</b> {formatted}")
+            self.lbl_ai_ru.setText(f"{theme.tag_html('AI RU')}&nbsp; {formatted}")
             self.lbl_ai_ru.setVisible(True)
 
 
@@ -200,87 +236,103 @@ class CopilotMainWindow(QMainWindow):
         super().__init__()
 
         self.setWindowTitle("AI Interview Copilot")
-        self.resize(450, 600)
-        self.setMinimumSize(320, 280)
+        self.resize(460, 640)
+        self.setMinimumSize(340, 300)
 
         self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
 
         self.central_widget = QWidget()
-        self.central_widget.setStyleSheet("""
-            QWidget#MainContainer {
-                background-color: rgba(25, 25, 25, 0.3);
-                border-radius: 15px;
-                border: 1px solid rgba(60, 60, 60, 0.4);
-            }
-        """)
+        self.central_widget.setStyleSheet(theme.main_container_style())
         self.central_widget.setObjectName("MainContainer")
         self.setCentralWidget(self.central_widget)
 
         self.main_layout = QVBoxLayout(self.central_widget)
-        self.main_layout.setContentsMargins(15, 15, 15, 15)
+        self.main_layout.setContentsMargins(16, 14, 16, 12)
+        self.main_layout.setSpacing(10)
 
-        # Header
+        # Brand / header
         self.header_layout = QHBoxLayout()
+        self.header_layout.setSpacing(8)
+
+        brand_col = QVBoxLayout()
+        brand_col.setSpacing(1)
         self.title_lbl = QLabel("AI Interview Copilot")
-        self.title_lbl.setStyleSheet("color: #FFFFFF; font-size: 16px; font-weight: bold;")
-        self.header_layout.addWidget(self.title_lbl)
+        self.title_lbl.setStyleSheet(theme.title_style())
+        brand_col.addWidget(self.title_lbl)
+        self.subtitle_lbl = QLabel("Live suggestions")
+        self.subtitle_lbl.setStyleSheet(theme.caption_style())
+        brand_col.addWidget(self.subtitle_lbl)
+        self.header_layout.addLayout(brand_col)
         self.header_layout.addStretch()
 
-        self.status_lbl = QLabel("")
-        self.status_lbl.setStyleSheet("color: #888888; font-size: 12px;")
-        self.header_layout.addWidget(self.status_lbl)
-
         self.pause_btn = QPushButton("Pause")
-        self.pause_btn.setFixedHeight(28)
-        self.pause_btn.setStyleSheet(self._btn_style())
+        self.pause_btn.setFixedHeight(30)
+        self.pause_btn.setCursor(Qt.PointingHandCursor)
+        self.pause_btn.setStyleSheet(theme.button_style())
         self.header_layout.addWidget(self.pause_btn)
 
         self.clear_btn = QPushButton("Clear")
-        self.clear_btn.setFixedHeight(28)
-        self.clear_btn.setStyleSheet(self._btn_style())
+        self.clear_btn.setFixedHeight(30)
+        self.clear_btn.setCursor(Qt.PointingHandCursor)
+        self.clear_btn.setStyleSheet(theme.button_style())
         self.header_layout.addWidget(self.clear_btn)
 
         self.close_btn = QPushButton("✕")
-        self.close_btn.setFixedSize(28, 28)
-        self.close_btn.setStyleSheet("""
-            QPushButton {
-                background-color: rgba(255, 255, 255, 0.1);
-                color: #AAAAAA;
-                border: none;
-                border-radius: 14px;
-                font-size: 14px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: rgba(255, 60, 60, 0.6);
-                color: #FFFFFF;
-            }
-        """)
+        self.close_btn.setFixedSize(30, 30)
+        self.close_btn.setCursor(Qt.PointingHandCursor)
+        self.close_btn.setToolTip("Quit (Esc hides, Ctrl+Shift+H shows/hides)")
+        self.close_btn.setStyleSheet(theme.close_button_style())
         self.close_btn.clicked.connect(QApplication.instance().quit)
         self.header_layout.addWidget(self.close_btn)
         self.main_layout.addLayout(self.header_layout)
 
-        # Controls row: profile + device
+        # Controls: profile + device
         controls = QHBoxLayout()
+        controls.setSpacing(8)
+
+        profile_box = QVBoxLayout()
+        profile_box.setSpacing(3)
+        profile_lbl = QLabel("PROFILE")
+        profile_lbl.setStyleSheet(theme.caption_style())
+        profile_box.addWidget(profile_lbl)
         self.profile_combo = QComboBox()
         self.profile_combo.setMinimumWidth(120)
-        self.profile_combo.setStyleSheet(self._combo_style())
-        controls.addWidget(QLabel("Profile:"))
-        controls.addWidget(self.profile_combo, 1)
+        self.profile_combo.setStyleSheet(theme.combo_style())
+        profile_box.addWidget(self.profile_combo)
+        controls.addLayout(profile_box, 1)
 
+        device_box = QVBoxLayout()
+        device_box.setSpacing(3)
+        device_lbl = QLabel("DEVICE")
+        device_lbl.setStyleSheet(theme.caption_style())
+        device_box.addWidget(device_lbl)
         self.device_combo = QComboBox()
         self.device_combo.setMinimumWidth(140)
-        self.device_combo.setStyleSheet(self._combo_style())
-        controls.addWidget(QLabel("Device:"))
-        controls.addWidget(self.device_combo, 1)
+        self.device_combo.setStyleSheet(theme.combo_style())
+        device_box.addWidget(self.device_combo)
+        controls.addLayout(device_box, 1)
 
+        settings_col = QVBoxLayout()
+        settings_col.setSpacing(3)
+        settings_spacer = QLabel(" ")
+        settings_spacer.setStyleSheet(theme.caption_style())
+        settings_col.addWidget(settings_spacer)
         self.settings_btn = QPushButton("Settings")
-        self.settings_btn.setFixedHeight(28)
-        self.settings_btn.setStyleSheet(self._btn_style())
+        self.settings_btn.setFixedHeight(30)
+        self.settings_btn.setCursor(Qt.PointingHandCursor)
+        self.settings_btn.setStyleSheet(theme.button_style())
         self.settings_btn.clicked.connect(self._open_settings)
-        controls.addWidget(self.settings_btn)
+        settings_col.addWidget(self.settings_btn)
+        controls.addLayout(settings_col)
+
         self.main_layout.addLayout(controls)
+
+        self.status_lbl = QLabel("")
+        self.status_lbl.setWordWrap(True)
+        self.status_lbl.setStyleSheet(theme.status_style_idle())
+        self.status_lbl.setVisible(False)
+        self.main_layout.addWidget(self.status_lbl)
 
         self.privacy_banner = PrivacyBanner()
         self.main_layout.addWidget(self.privacy_banner)
@@ -288,13 +340,25 @@ class CopilotMainWindow(QMainWindow):
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll_area.setFocusPolicy(Qt.NoFocus)
 
         self.scroll_content = QWidget()
         self.scroll_layout = QVBoxLayout(self.scroll_content)
         self.scroll_layout.setAlignment(Qt.AlignTop)
-        self.scroll_layout.setContentsMargins(0, 0, 10, 0)
+        self.scroll_layout.setContentsMargins(0, 4, 6, 0)
+        self.scroll_layout.setSpacing(0)
+
+        self.empty_lbl = QLabel(
+            "Waiting for interview audio.\n"
+            "Transcripts and AI answers will appear here."
+        )
+        self.empty_lbl.setWordWrap(True)
+        self.empty_lbl.setAlignment(Qt.AlignCenter)
+        self.empty_lbl.setStyleSheet(theme.empty_state_style())
+        self.scroll_layout.addWidget(self.empty_lbl)
+
         self.scroll_area.setWidget(self.scroll_content)
-        self.main_layout.addWidget(self.scroll_area)
+        self.main_layout.addWidget(self.scroll_area, 1)
 
         grip_row = QHBoxLayout()
         grip_row.addStretch()
@@ -305,63 +369,49 @@ class CopilotMainWindow(QMainWindow):
         self._drag_pos = None
         self._result_widgets: list[ResultWidget] = []
         self._widget_map = {}
-        self._has_persistent_error = False
+        # source -> message; the most recently set one is displayed.
+        self._persistent_errors: dict[str | None, str] = {}
         self._paused = False
         self._transient_timer = QTimer(self)
         self._transient_timer.setSingleShot(True)
         self._transient_timer.timeout.connect(self._clear_transient_status)
+        self._hotkey_hwnd: int | None = None
+        self._tray: QSystemTrayIcon | None = None
 
         shortcut_esc = QShortcut(QKeySequence(Qt.Key_Escape), self)
-        shortcut_esc.activated.connect(QApplication.instance().quit)
+        shortcut_esc.activated.connect(self.hide_to_background)
 
-        shortcut_hide = QShortcut(QKeySequence("Ctrl+Shift+H"), self)
-        shortcut_hide.activated.connect(self.toggle_visibility)
+        self._hide_shortcut = QShortcut(QKeySequence("Ctrl+Shift+H"), self)
+        self._hide_shortcut.activated.connect(self.toggle_visibility)
 
         self.title_lbl.installEventFilter(self)
+        self.subtitle_lbl.installEventFilter(self)
         self.status_lbl.installEventFilter(self)
 
         self.clear_btn.clicked.connect(self.clear_cards)
         self.pause_btn.clicked.connect(self._on_pause_clicked)
+        self.profile_combo.currentIndexChanged.connect(self._profile_changed)
+        self.device_combo.currentIndexChanged.connect(self._device_changed)
 
         # Callbacks wired by app.py
         self.on_profile_changed = None
         self.on_device_changed = None
         self.on_pause_toggled = None
         self.on_clear_history = None
+        self.on_settings_saved = None
 
         self._restore_geometry()
 
-    @staticmethod
-    def _btn_style() -> str:
-        return """
-            QPushButton {
-                background-color: rgba(255, 255, 255, 0.1);
-                color: #CCCCCC;
-                border: none;
-                border-radius: 6px;
-                padding: 4px 10px;
-                font-size: 12px;
-            }
-            QPushButton:hover { background-color: rgba(255, 255, 255, 0.2); color: #FFFFFF; }
-        """
+    @property
+    def has_persistent_error(self) -> bool:
+        return bool(self._persistent_errors)
 
-    @staticmethod
-    def _combo_style() -> str:
-        return """
-            QComboBox {
-                background-color: rgba(40,40,40,0.7);
-                color: #DDDDDD;
-                border: 1px solid rgba(80,80,80,0.5);
-                border-radius: 4px;
-                padding: 2px 6px;
-                font-size: 12px;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #2A2A2A;
-                color: #EEEEEE;
-                selection-background-color: #444444;
-            }
-        """
+    def set_pipeline_ready(self, ready: bool) -> None:
+        for w in (self.pause_btn, self.profile_combo, self.device_combo):
+            w.setEnabled(ready)
+
+    def _refresh_empty_state(self) -> None:
+        self.empty_lbl.setVisible(len(self._result_widgets) == 0)
 
     def show(self):
         super().show()
@@ -369,9 +419,94 @@ class CopilotMainWindow(QMainWindow):
 
     def toggle_visibility(self):
         if self.isVisible():
-            self.hide()
+            self.hide_to_background()
         else:
             self.show()
+            self.raise_()
+            self.activateWindow()
+
+    def _can_restore_hidden(self) -> bool:
+        return self._hotkey_hwnd is not None or (
+            self._tray is not None and self._tray.isVisible()
+        )
+
+    def hide_to_background(self):
+        # The frameless Qt.Tool window has no taskbar entry; never hide it unrecoverably.
+        if not self._can_restore_hidden():
+            self.set_error(
+                "Can't hide: no global hotkey or tray icon available.", transient=True
+            )
+            return
+        self.hide()
+
+    def install_global_hotkey(self) -> bool:
+        """Register Ctrl+Shift+H system-wide so the hidden window can be restored."""
+        if sys.platform != "win32" or QGuiApplication.platformName() != "windows":
+            return False
+        try:
+            hwnd = int(self.winId())
+            ok = ctypes.windll.user32.RegisterHotKey(
+                ctypes.c_void_p(hwnd),
+                _HOTKEY_ID,
+                _MOD_CONTROL | _MOD_SHIFT | _MOD_NOREPEAT,
+                ord("H"),
+            )
+        except (AttributeError, OSError, ValueError) as e:
+            logger.warning(f"Global hotkey unavailable: {e}")
+            return False
+        if not ok:
+            logger.warning(
+                "Failed to register global Ctrl+Shift+H hotkey "
+                "(already in use?). Falling back to in-window shortcut."
+            )
+            return False
+        self._hotkey_hwnd = hwnd
+        self._hide_shortcut.setEnabled(False)
+        return True
+
+    def release_global_hotkey(self) -> None:
+        if self._hotkey_hwnd is None:
+            return
+        try:
+            ctypes.windll.user32.UnregisterHotKey(
+                ctypes.c_void_p(self._hotkey_hwnd), _HOTKEY_ID
+            )
+        except (AttributeError, OSError) as e:
+            logger.debug(f"UnregisterHotKey failed: {e}")
+        self._hotkey_hwnd = None
+        self._hide_shortcut.setEnabled(True)
+
+    def nativeEvent(self, event_type, message):
+        if self._hotkey_hwnd is not None:
+            from ctypes import wintypes
+
+            msg = wintypes.MSG.from_address(int(message))
+            if msg.message == _WM_HOTKEY and msg.wParam == _HOTKEY_ID:
+                self.toggle_visibility()
+                return True, 0
+        return super().nativeEvent(event_type, message)
+
+    def setup_tray(self) -> bool:
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return False
+        icon = self.windowIcon()
+        if icon.isNull():
+            icon = QApplication.style().standardIcon(QStyle.SP_ComputerIcon)
+        tray = QSystemTrayIcon(icon, self)
+        tray.setToolTip("AI Interview Copilot")
+        menu = QMenu(self)
+        menu.addAction("Show / Hide", self.toggle_visibility)
+        menu.addSeparator()
+        menu.addAction("Quit", QApplication.instance().quit)
+        tray.setContextMenu(menu)
+        tray.activated.connect(self._on_tray_activated)
+        tray.show()
+        self._tray = tray
+        return True
+
+    def _on_tray_activated(self, reason) -> None:
+        if reason == QSystemTrayIcon.Trigger:
+            self.toggle_visibility()
 
     def _apply_display_affinity(self):
         if sys.platform != "win32":
@@ -380,7 +515,6 @@ class CopilotMainWindow(QMainWindow):
             hwnd = int(self.winId())
             user32 = ctypes.windll.user32
             result = user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)
-            from ..logging_config import logger
             if result:
                 logger.info("Window display affinity set: excluded from screen capture.")
             else:
@@ -389,48 +523,60 @@ class CopilotMainWindow(QMainWindow):
                     "Window may be visible in screen capture."
                 )
         except (RuntimeError, ValueError, TypeError, OSError) as e:
-            from ..logging_config import logger
             logger.warning(f"SetWindowDisplayAffinity not available: {e}")
 
-    def set_error(self, text: str, *, transient: bool = False):
+    def _show_status(self, text: str, style: str) -> None:
+        self.status_lbl.setText(text)
+        self.status_lbl.setStyleSheet(style)
+        self.status_lbl.setVisible(bool(text))
+
+    def _render_persistent(self) -> None:
+        if self._persistent_errors:
+            text = next(reversed(self._persistent_errors.values()))
+            self._show_status(text, theme.status_style_error())
+        else:
+            self._show_status("", theme.status_style_idle())
+
+    def set_error(self, text: str, *, transient: bool = False, source: str | None = None):
         if transient:
-            self.status_lbl.setText(text)
-            self.status_lbl.setStyleSheet("color: #FF9800; font-size: 12px;")
+            self._show_status(text, theme.status_style_warn())
             self._transient_timer.start(_TRANSIENT_MS)
             return
-        self._has_persistent_error = True
-        self.status_lbl.setText(text)
-        self.status_lbl.setStyleSheet(
-            "color: #F44336; font-size: 12px; font-weight: bold;"
-        )
+        self._persistent_errors.pop(source, None)
+        self._persistent_errors[source] = text
+        self._transient_timer.stop()
+        self._render_persistent()
 
-    def clear_persistent_error(self):
-        self._has_persistent_error = False
-        self.status_lbl.setStyleSheet("color: #888888; font-size: 12px;")
+    def clear_persistent_error(self, source: str | None = None):
+        """Clear persistent errors from ``source`` (all errors when None)."""
+        if source is None:
+            removed = bool(self._persistent_errors)
+            self._persistent_errors.clear()
+        else:
+            removed = self._persistent_errors.pop(source, None) is not None
+        if removed and not self._transient_timer.isActive():
+            self._render_persistent()
 
     def _clear_transient_status(self):
-        if self._has_persistent_error:
-            return
-        self.status_lbl.setText("")
-        self.status_lbl.setStyleSheet("color: #888888; font-size: 12px;")
+        self._render_persistent()
 
     def set_status(self, text: str):
-        if self._has_persistent_error and not text:
-            return
-        if self._has_persistent_error:
+        if self._persistent_errors:
             # Don't overwrite persistent error with routine status
             return
-        self.status_lbl.setText(text)
-        self.status_lbl.setStyleSheet("color: #888888; font-size: 12px;")
+        self._show_status(text, theme.status_style_idle())
 
     def populate_profiles(self, profiles: list[str], active: str | None):
         self.profile_combo.blockSignals(True)
         self.profile_combo.clear()
-        self.profile_combo.addItems(profiles)
+        if not active or active not in profiles:
+            # Without a real current item, picking the first profile wouldn't emit a change.
+            self.profile_combo.addItem(_PROFILE_PLACEHOLDER, None)
+        for name in profiles:
+            self.profile_combo.addItem(name, name)
         if active and active in profiles:
-            self.profile_combo.setCurrentText(active)
+            self.profile_combo.setCurrentIndex(self.profile_combo.findData(active))
         self.profile_combo.blockSignals(False)
-        self.profile_combo.currentTextChanged.connect(self._profile_changed)
 
     def populate_devices(self, devices: list[dict], active_id: str | None):
         self.device_combo.blockSignals(True)
@@ -447,15 +593,17 @@ class CopilotMainWindow(QMainWindow):
             if active_id and d["id"] == active_id:
                 selected = i + 1
         self.device_combo.setCurrentIndex(selected)
+        self.device_combo.setToolTip(self.device_combo.currentText())
         self.device_combo.blockSignals(False)
-        self.device_combo.currentIndexChanged.connect(self._device_changed)
 
-    def _profile_changed(self, name: str):
+    def _profile_changed(self, index: int):
+        name = self.profile_combo.itemData(index)
         if self.on_profile_changed and name:
             self.on_profile_changed(name)
 
     def _device_changed(self, index: int):
         device_id = self.device_combo.itemData(index)
+        self.device_combo.setToolTip(self.device_combo.currentText())
         self._persist_device(device_id)
         if self.on_device_changed:
             self.on_device_changed(device_id)
@@ -464,7 +612,8 @@ class CopilotMainWindow(QMainWindow):
         from .settings_dialog import SettingsDialog
 
         dlg = SettingsDialog(self)
-        dlg.exec()
+        if dlg.exec() == QDialog.Accepted and self.on_settings_saved:
+            self.on_settings_saved()
 
     @staticmethod
     def _persist_device(device_id: str | None) -> None:
@@ -495,6 +644,9 @@ class CopilotMainWindow(QMainWindow):
     def _on_pause_clicked(self):
         self._paused = not self._paused
         self.pause_btn.setText("Resume" if self._paused else "Pause")
+        self.pause_btn.setStyleSheet(
+            theme.button_style(primary=self._paused)
+        )
         if self.on_pause_toggled:
             self.on_pause_toggled(self._paused)
 
@@ -504,6 +656,7 @@ class CopilotMainWindow(QMainWindow):
             w.deleteLater()
         self._result_widgets.clear()
         self._widget_map.clear()
+        self._refresh_empty_state()
         if self.on_clear_history:
             self.on_clear_history()
 
@@ -532,6 +685,7 @@ class CopilotMainWindow(QMainWindow):
         self.scroll_layout.addWidget(widget)
         self._result_widgets.append(widget)
         self._widget_map[result.id] = widget
+        self._refresh_empty_state()
 
         while len(self._result_widgets) > _MAX_RESULT_CARDS:
             oldest = self._result_widgets.pop(0)
@@ -553,6 +707,7 @@ class CopilotMainWindow(QMainWindow):
             self._result_widgets.remove(widget)
         self.scroll_layout.removeWidget(widget)
         widget.deleteLater()
+        self._refresh_empty_state()
 
     def update_suggestion(self, result: PipelineResult):
         widget = self._widget_map.get(result.id)
@@ -603,4 +758,7 @@ class CopilotMainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self.save_geometry()
+        self.release_global_hotkey()
+        if self._tray is not None:
+            self._tray.hide()
         super().closeEvent(event)

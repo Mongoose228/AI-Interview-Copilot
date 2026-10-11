@@ -9,6 +9,7 @@ import soundcard as sc
 from ..config import config
 from ..models import AudioChunk
 from .base import AudioCaptureBackend
+from .dsp import AutoGain, NoiseGate, process_chunk_audio
 
 # Suppress harmless WASAPI discontinuity warnings
 warnings.filterwarnings("ignore", message="data discontinuity in recording", module="soundcard")
@@ -22,6 +23,8 @@ class SoundCardWASAPIBackend(AudioCaptureBackend):
         self._lock = threading.Lock()
         self._sample_rate = config.AUDIO_SAMPLE_RATE
         self._chunk_frames = int(self._sample_rate * (config.AUDIO_CHUNK_MS / 1000.0))
+        self._gate = NoiseGate()
+        self._agc = AutoGain(target_peak=config.DSP_TARGET_PEAK)
 
     def list_devices(self) -> list[dict]:
         mics = sc.all_microphones(include_loopback=True)
@@ -61,6 +64,9 @@ class SoundCardWASAPIBackend(AudioCaptureBackend):
             if self._running:
                 return
 
+            self._mic = None
+            self._gate.reset()
+            self._agc.reset()
             mics = sc.all_microphones(include_loopback=True)
             if device_id:
                 for m in mics:
@@ -106,9 +112,9 @@ class SoundCardWASAPIBackend(AudioCaptureBackend):
         arr = data.astype(np.float32)
         channels = 2 if arr.ndim == 2 else 1
         if config.DSP_ENABLED:
-            from .dsp import process_chunk_audio
-
-            arr, sample_rate = process_chunk_audio(arr, sample_rate)
+            arr, sample_rate = process_chunk_audio(
+                arr, sample_rate, gate=self._gate, agc=self._agc
+            )
             channels = 1
 
         return AudioChunk(

@@ -11,7 +11,7 @@ from ..audio.dsp import float32_to_pcm16
 from ..config import config
 from ..logging_config import logger
 from ..models import SpeechPhrase, Transcript
-from .base import SttEngine
+from .base import SttEngine, SttError
 
 
 class SonioxEngine(SttEngine):
@@ -62,25 +62,26 @@ class SonioxEngine(SttEngine):
                 resp = client.post(url, params=params, content=pcm, headers=headers)
                 resp.raise_for_status()
                 payload = resp.json()
-            text = self._extract_text(payload)
-            ended = time.time()
-            return Transcript(
-                phrase_id=phrase.id,
-                text_en=text,
-                language="en",
-                confidence=0.0,
-                stt_duration_s=ended - started,
-                stt_started_at=started,
-                stt_ended_at=ended,
-                is_final=phrase.is_final,
-                revision=phrase.revision,
-                speech_started_at=phrase.captured_at,
-                speech_ended_at=phrase.vad_end_at,
-                audio_duration_s=phrase.duration_s,
-            )
-        except Exception as e:
+        except (httpx.HTTPError, ValueError) as e:
             logger.error(f"Soniox transcription failed: {e}")
-            return self._empty(phrase, started)
+            raise SttError(f"Soniox transcription failed: {e}") from e
+        text = self._extract_text(payload) if isinstance(payload, dict) else ""
+        ended = time.time()
+        return Transcript(
+            phrase_id=phrase.id,
+            text_en=text,
+            language="en",
+            confidence=0.0,
+            stt_duration_s=ended - started,
+            speaker=getattr(phrase, "speaker", "interviewer"),
+            stt_started_at=started,
+            stt_ended_at=ended,
+            is_final=phrase.is_final,
+            revision=phrase.revision,
+            speech_started_at=phrase.captured_at,
+            speech_ended_at=phrase.vad_end_at,
+            audio_duration_s=phrase.duration_s,
+        )
 
     @staticmethod
     def _extract_text(payload: dict) -> str:
@@ -102,6 +103,7 @@ class SonioxEngine(SttEngine):
             language="en",
             confidence=0.0,
             stt_duration_s=time.time() - started,
+            speaker=getattr(phrase, "speaker", "interviewer"),
             stt_started_at=started,
             stt_ended_at=time.time(),
             is_final=phrase.is_final,

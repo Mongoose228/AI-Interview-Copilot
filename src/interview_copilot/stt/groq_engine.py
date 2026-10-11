@@ -7,11 +7,12 @@ import time
 import wave
 
 import numpy as np
+from openai import OpenAI, OpenAIError
 
 from ..config import config
 from ..logging_config import logger
 from ..models import SpeechPhrase, Transcript
-from .base import SttEngine
+from .base import SttEngine, SttError
 
 
 class GroqWhisperEngine(SttEngine):
@@ -19,6 +20,7 @@ class GroqWhisperEngine(SttEngine):
         self._api_key = api_key if api_key is not None else config.GROQ_API_KEY
         self._model = model or config.GROQ_WHISPER_MODEL
         self._prompt: str | None = None
+        self._client: OpenAI | None = None
 
     @property
     def is_available(self) -> bool:
@@ -27,48 +29,51 @@ class GroqWhisperEngine(SttEngine):
     def set_initial_prompt(self, prompt: str | None) -> None:
         self._prompt = prompt
 
+    def _get_client(self) -> OpenAI:
+        if self._client is None:
+            self._client = OpenAI(
+                api_key=self._api_key,
+                base_url=config.GROQ_BASE_URL,
+                timeout=config.NETWORK_READ_TIMEOUT,
+            )
+        return self._client
+
     def transcribe(self, phrase: SpeechPhrase) -> Transcript:
         started = time.time()
         if not self.is_available:
             return self._empty(phrase, started)
 
+        wav_bytes = self._to_wav_bytes(phrase.audio_data)
+        kwargs = {
+            "model": self._model,
+            "file": ("audio.wav", wav_bytes, "audio/wav"),
+            "language": "en",
+            "response_format": "verbose_json",
+        }
+        if self._prompt:
+            kwargs["prompt"] = self._prompt
         try:
-            from openai import OpenAI
-
-            client = OpenAI(
-                api_key=self._api_key,
-                base_url=config.GROQ_BASE_URL,
-                timeout=config.NETWORK_READ_TIMEOUT,
-            )
-            wav_bytes = self._to_wav_bytes(phrase.audio_data)
-            kwargs = {
-                "model": self._model,
-                "file": ("audio.wav", wav_bytes, "audio/wav"),
-                "language": "en",
-                "response_format": "verbose_json",
-            }
-            if self._prompt:
-                kwargs["prompt"] = self._prompt
-            result = client.audio.transcriptions.create(**kwargs)
-            text = (getattr(result, "text", None) or "").strip()
-            ended = time.time()
-            return Transcript(
-                phrase_id=phrase.id,
-                text_en=text,
-                language="en",
-                confidence=0.0,
-                stt_duration_s=ended - started,
-                stt_started_at=started,
-                stt_ended_at=ended,
-                is_final=phrase.is_final,
-                revision=phrase.revision,
-                speech_started_at=phrase.captured_at,
-                speech_ended_at=phrase.vad_end_at,
-                audio_duration_s=phrase.duration_s,
-            )
-        except Exception as e:
+            result = self._get_client().audio.transcriptions.create(**kwargs)
+        except OpenAIError as e:
             logger.error(f"Groq Whisper failed: {e}")
-            return self._empty(phrase, started)
+            raise SttError(f"Groq Whisper failed: {e}") from e
+        text = (getattr(result, "text", None) or "").strip()
+        ended = time.time()
+        return Transcript(
+            phrase_id=phrase.id,
+            text_en=text,
+            language="en",
+            confidence=0.0,
+            stt_duration_s=ended - started,
+            speaker=getattr(phrase, "speaker", "interviewer"),
+            stt_started_at=started,
+            stt_ended_at=ended,
+            is_final=phrase.is_final,
+            revision=phrase.revision,
+            speech_started_at=phrase.captured_at,
+            speech_ended_at=phrase.vad_end_at,
+            audio_duration_s=phrase.duration_s,
+        )
 
     @staticmethod
     def _to_wav_bytes(audio: np.ndarray) -> bytes:
@@ -92,6 +97,7 @@ class GroqWhisperEngine(SttEngine):
             language="en",
             confidence=0.0,
             stt_duration_s=time.time() - started,
+            speaker=getattr(phrase, "speaker", "interviewer"),
             stt_started_at=started,
             stt_ended_at=time.time(),
             is_final=phrase.is_final,

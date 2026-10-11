@@ -13,7 +13,7 @@ import numpy as np
 
 from ..logging_config import logger
 from ..models import SpeechPhrase
-from ..stt.base import SttEngine
+from ..stt.base import SttEngine, SttError
 from .wer import cer, term_hits, wer
 
 DEFAULT_GOLDEN = Path(__file__).resolve().parents[3] / "testdata" / "stt_golden"
@@ -91,9 +91,12 @@ def run_harness(
             revision=1,
         )
         t0 = time.time()
-        transcript = engine.transcribe(phrase)
+        try:
+            hyp = engine.transcribe(phrase).text_en or ""
+        except SttError as e:
+            logger.warning(f"[Harness] {clip['id']}: {e}")
+            hyp = ""
         latency = time.time() - t0
-        hyp = transcript.text_en or ""
         ref = clip.get("reference", "")
         results.append(
             ClipResult(

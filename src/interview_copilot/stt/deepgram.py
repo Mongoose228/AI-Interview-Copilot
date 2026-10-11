@@ -16,10 +16,19 @@ from ..audio.dsp import float32_to_pcm16
 from ..config import config
 from ..logging_config import logger
 from ..models import SpeechPhrase, Transcript
-from .base import SttEngine, TranscriptCallback
+from .base import SttEngine, SttError, TranscriptCallback
+
+# WebSocketApp.send defaults to text frames; Deepgram needs audio as binary frames.
+_OPCODE_BINARY = 0x2
 
 
 class DeepgramEngine(SttEngine):
+    # Deepgram closes the stream after ~10 s without audio or KeepAlive.
+    _KEEPALIVE_INTERVAL_S = 5.0
+    _KEEPALIVE_CHECK_S = 0.5
+    _RECONNECT_BASE_DELAY_S = 1.0
+    _RECONNECT_MAX_DELAY_S = 30.0
+
     def __init__(
         self,
         api_key: str | None = None,
@@ -31,15 +40,19 @@ class DeepgramEngine(SttEngine):
         self._language = language or config.DEEPGRAM_LANGUAGE
         self._keyterms: list[str] = []
         self._lock = threading.Lock()
+        self._http: httpx.Client | None = None
 
         self._ws = None
+        self._ws_app = None
         self._ws_thread: threading.Thread | None = None
+        self._keepalive_thread: threading.Thread | None = None
         self._on_transcript: TranscriptCallback | None = None
         self._stream_stop = threading.Event()
         self._stream_phrase_id: uuid.UUID | None = None
         self._stream_revision = 0
         self._stream_speech_started = 0.0
         self._send_lock = threading.Lock()
+        self._last_send = 0.0
 
     @property
     def is_available(self) -> bool:
@@ -51,16 +64,27 @@ class DeepgramEngine(SttEngine):
     def set_keyterms(self, terms: list[str]) -> None:
         self._keyterms = list(terms or [])[:50]
 
+    def _get_http_client(self) -> httpx.Client:
+        with self._lock:
+            if self._http is None:
+                self._http = httpx.Client(
+                    timeout=httpx.Timeout(
+                        config.NETWORK_READ_TIMEOUT,
+                        connect=config.NETWORK_CONNECT_TIMEOUT,
+                    )
+                )
+            return self._http
+
     def warm_up(self) -> None:
         if not self.is_available:
             return
         # Cheap auth check; ignore failures (network may be flaky at boot).
         try:
-            with httpx.Client(timeout=config.NETWORK_CONNECT_TIMEOUT) as client:
-                client.get(
-                    "https://api.deepgram.com/v1/projects",
-                    headers={"Authorization": f"Token {self._api_key}"},
-                )
+            self._get_http_client().get(
+                "https://api.deepgram.com/v1/projects",
+                headers={"Authorization": f"Token {self._api_key}"},
+                timeout=config.NETWORK_CONNECT_TIMEOUT,
+            )
         except Exception as e:
             logger.debug(f"Deepgram warm_up skipped: {e}")
 
@@ -115,34 +139,29 @@ class DeepgramEngine(SttEngine):
             "Content-Type": "audio/raw",
         }
         try:
-            with httpx.Client(
-                timeout=httpx.Timeout(
-                    config.NETWORK_READ_TIMEOUT,
-                    connect=config.NETWORK_CONNECT_TIMEOUT,
-                )
-            ) as client:
-                resp = client.post(url, content=pcm, headers=headers)
-                resp.raise_for_status()
-                payload = resp.json()
-            text, conf = self._parse_prerecorded(payload)
-            ended = time.time()
-            return Transcript(
-                phrase_id=phrase.id,
-                text_en=text,
-                language=self._language,
-                confidence=conf,
-                stt_duration_s=ended - started,
-                stt_started_at=started,
-                stt_ended_at=ended,
-                is_final=phrase.is_final,
-                revision=phrase.revision,
-                speech_started_at=phrase.captured_at,
-                speech_ended_at=phrase.vad_end_at,
-                audio_duration_s=phrase.duration_s,
-            )
-        except Exception as e:
+            resp = self._get_http_client().post(url, content=pcm, headers=headers)
+            resp.raise_for_status()
+            payload = resp.json()
+        except (httpx.HTTPError, ValueError) as e:
             logger.error(f"Deepgram prerecorded failed: {e}")
-            return self._empty(phrase, started, str(e))
+            raise SttError(f"Deepgram prerecorded failed: {e}") from e
+        text, conf = self._parse_prerecorded(payload)
+        ended = time.time()
+        return Transcript(
+            phrase_id=phrase.id,
+            text_en=text,
+            language=self._language,
+            confidence=conf,
+            stt_duration_s=ended - started,
+            speaker=getattr(phrase, "speaker", "interviewer"),
+            stt_started_at=started,
+            stt_ended_at=ended,
+            is_final=phrase.is_final,
+            revision=phrase.revision,
+            speech_started_at=phrase.captured_at,
+            speech_ended_at=phrase.vad_end_at,
+            audio_duration_s=phrase.duration_s,
+        )
 
     @staticmethod
     def _parse_prerecorded(payload: dict) -> tuple[str, float]:
@@ -161,10 +180,15 @@ class DeepgramEngine(SttEngine):
         self._stream_phrase_id = uuid.uuid4()
         self._stream_revision = 0
         self._stream_speech_started = time.time()
+        self._last_send = time.monotonic()
         self._ws_thread = threading.Thread(
             target=self._ws_loop, name="deepgram-ws", daemon=True
         )
+        self._keepalive_thread = threading.Thread(
+            target=self._keepalive_loop, name="deepgram-keepalive", daemon=True
+        )
         self._ws_thread.start()
+        self._keepalive_thread.start()
 
     def feed_audio(self, pcm16: bytes, sample_rate: int = 16000) -> None:
         if sample_rate != 16000:
@@ -174,7 +198,8 @@ class DeepgramEngine(SttEngine):
             return
         with self._send_lock:
             try:
-                ws.send(pcm16)
+                ws.send(pcm16, _OPCODE_BINARY)
+                self._last_send = time.monotonic()
             except Exception as e:
                 logger.debug(f"Deepgram send failed: {e}")
 
@@ -182,20 +207,39 @@ class DeepgramEngine(SttEngine):
         self._stream_stop.set()
         ws = self._ws
         if ws is not None:
+            with self._send_lock:
+                try:
+                    ws.send(json.dumps({"type": "CloseStream"}))
+                except Exception:
+                    pass
+        ws_app = self._ws_app
+        if ws_app is not None:
             try:
-                with self._send_lock:
-                    try:
-                        ws.send(json.dumps({"type": "CloseStream"}))
-                    except Exception:
-                        pass
-                    ws.close()
+                ws_app.close()
             except Exception:
                 pass
+        for t in (self._ws_thread, self._keepalive_thread):
+            if t and t.is_alive() and t is not threading.current_thread():
+                t.join(timeout=2.0)
         self._ws = None
-        if self._ws_thread and self._ws_thread.is_alive():
-            self._ws_thread.join(timeout=2.0)
+        self._ws_app = None
         self._ws_thread = None
+        self._keepalive_thread = None
         self._on_transcript = None
+
+    def _keepalive_loop(self) -> None:
+        while not self._stream_stop.wait(self._KEEPALIVE_CHECK_S):
+            ws = self._ws
+            if ws is None:
+                continue
+            if time.monotonic() - self._last_send < self._KEEPALIVE_INTERVAL_S:
+                continue
+            with self._send_lock:
+                try:
+                    ws.send(json.dumps({"type": "KeepAlive"}))
+                    self._last_send = time.monotonic()
+                except Exception as e:
+                    logger.debug(f"Deepgram KeepAlive failed: {e}")
 
     def _ws_loop(self) -> None:
         try:
@@ -207,8 +251,8 @@ class DeepgramEngine(SttEngine):
             )
             raise RuntimeError("websocket-client not installed") from e
 
-        url = self._build_url(streaming=True)
         headers = [f"Authorization: Token {self._api_key}"]
+        delay = self._RECONNECT_BASE_DELAY_S
 
         def on_message(_ws, message: str):
             self._handle_message(message)
@@ -220,22 +264,38 @@ class DeepgramEngine(SttEngine):
             logger.info("Deepgram WS closed")
 
         def on_open(ws):
+            nonlocal delay
             logger.info("Deepgram WS connected")
+            delay = self._RECONNECT_BASE_DELAY_S
+            self._last_send = time.monotonic()
             self._ws = ws
 
-        ws_app = websocket.WebSocketApp(
-            url,
-            header=headers,
-            on_open=on_open,
-            on_message=on_message,
-            on_error=on_error,
-            on_close=on_close,
-        )
-        self._ws = ws_app
-        try:
-            ws_app.run_forever(ping_interval=20, ping_timeout=10)
-        finally:
-            self._ws = None
+        while not self._stream_stop.is_set():
+            ws_app = websocket.WebSocketApp(
+                self._build_url(streaming=True),
+                header=headers,
+                on_open=on_open,
+                on_message=on_message,
+                on_error=on_error,
+                on_close=on_close,
+            )
+            self._ws_app = ws_app
+            try:
+                ws_app.run_forever(ping_interval=20, ping_timeout=10)
+            except Exception as e:
+                logger.error(f"Deepgram WS loop failed: {e}")
+            finally:
+                self._ws = None
+            if self._stream_stop.is_set():
+                break
+            cb = self._on_transcript
+            if cb and self._stream_revision > 0:
+                # Close the interrupted utterance so its provisional card doesn't linger.
+                self._emit(cb, text="", is_final=True, confidence=0.0)
+            logger.warning(f"Deepgram WS disconnected; reconnecting in {delay:.1f}s")
+            if self._stream_stop.wait(delay):
+                break
+            delay = min(delay * 2, self._RECONNECT_MAX_DELAY_S)
 
     def _handle_message(self, message: str) -> None:
         cb = self._on_transcript
@@ -316,6 +376,7 @@ class DeepgramEngine(SttEngine):
             language=self._language,
             confidence=0.0,
             stt_duration_s=time.time() - started,
+            speaker=getattr(phrase, "speaker", "interviewer"),
             stt_started_at=started,
             stt_ended_at=time.time(),
             is_final=phrase.is_final,

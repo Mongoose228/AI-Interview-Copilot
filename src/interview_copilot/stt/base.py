@@ -10,6 +10,10 @@ from ..models import SpeechPhrase, Transcript
 TranscriptCallback = Callable[[Transcript], None]
 
 
+class SttError(RuntimeError):
+    """Hard transcription failure (network, HTTP, auth); triggers STT failover."""
+
+
 class SttEngine(ABC):
     """Common contract for batch and streaming speech-to-text backends."""
 

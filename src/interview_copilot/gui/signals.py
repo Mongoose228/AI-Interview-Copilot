@@ -10,3 +10,4 @@ class PipelineSignals(QObject):
     error_occurred = Signal(str, bool)
     status_changed = Signal(str)
     audio_status_changed = Signal(bool, str)
+    pipeline_ready = Signal()

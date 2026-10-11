@@ -11,10 +11,9 @@ _INJECTION_PATTERNS = [
     r"ignore\s+(all\s+)?previous\s+instructions",
     r"ignore\s+(all\s+)?above",
     r"disregard\s+(all\s+)?previous",
-    r"you\s+are\s+now\s+",
+    r"you\s+are\s+now\s+(?:an?|the|my|in)\s+",
     r"new\s+instructions?\s*:",
-    r"system\s*:\s*",
-    r"assistant\s*:\s*",
+    r"(?m)^[ \t]*(?:system|assistant)[ \t]*:[ \t]*",
     r"<\|.*?\|>",            # special tokens like <|im_start|>
     r"\[INST\]",
     r"\[/INST\]",

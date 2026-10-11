@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from pydantic import TypeAdapter, ValidationError
+
 from .logging_config import logger
 from .paths import get_data_dir
 
@@ -14,8 +16,10 @@ _KEYS = (
     "OPENROUTER_API_KEY",
     "DEEPGRAM_API_KEY",
     "GROQ_API_KEY",
+    "SONIOX_API_KEY",
     "DEEPL_API_KEY",
 )
+_plaintext_warned = False
 
 
 def _prefs_path() -> Path:
@@ -67,6 +71,7 @@ def load_prefs() -> dict[str, Any]:
 
 
 def save_prefs(prefs: dict[str, Any]) -> None:
+    global _plaintext_warned
     secrets = dict(prefs.get("secrets") or {})
     stored_in_keyring: list[str] = []
     for key in _KEYS:
@@ -79,6 +84,11 @@ def save_prefs(prefs: dict[str, Any]) -> None:
     }
     out = {**prefs, "secrets": plaintext_secrets}
     path = _prefs_path()
+    if not _plaintext_warned and any(k in _KEYS for k in plaintext_secrets):
+        _plaintext_warned = True
+        logger.warning(
+            f"System keyring unavailable; API keys are stored in plaintext at {path}"
+        )
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(out, f, indent=2)
@@ -90,12 +100,21 @@ def apply_prefs_to_config() -> None:
     """Overlay persisted prefs onto the live config object."""
     from . import config as config_mod
 
+    cfg = config_mod.config
+    fields = type(cfg).model_fields
     prefs = load_prefs()
     secrets = prefs.get("secrets") or {}
     for key, value in secrets.items():
-        if value and hasattr(config_mod.config, key):
-            object.__setattr__(config_mod.config, key, value)
+        if value and isinstance(value, str) and key in fields:
+            object.__setattr__(cfg, key, value)
     settings = prefs.get("settings") or {}
     for key, value in settings.items():
-        if hasattr(config_mod.config, key):
-            object.__setattr__(config_mod.config, key, value)
+        field = fields.get(key)
+        if field is None:
+            continue
+        try:
+            TypeAdapter(field.annotation).validate_python(value, strict=True)
+        except ValidationError:
+            logger.warning(f"Ignoring saved setting {key}={value!r}: invalid type/value")
+            continue
+        object.__setattr__(cfg, key, value)

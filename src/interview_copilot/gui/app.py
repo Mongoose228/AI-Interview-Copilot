@@ -8,8 +8,23 @@ from ..audio.soundcard_wasapi import SoundCardWASAPIBackend
 from ..logging_config import logger
 from ..pipeline import InterviewPipeline
 from ..suggestion.profile_manager import ProfileManager
+from . import theme
 from .main_window import CopilotMainWindow
 from .signals import PipelineSignals
+
+_ERROR_SOURCES = (
+    ("Audio device lost", "audio"),
+    ("No candidate profile", "profile"),
+    ("OpenRouter API key not set", "openrouter"),
+)
+
+
+def error_source(msg: str) -> str | None:
+    """Tag pipeline errors so recovering one subsystem doesn't clear another's error."""
+    for prefix, source in _ERROR_SOURCES:
+        if msg.startswith(prefix):
+            return source
+    return None
 
 
 def start_gui(device_id: str | None = None):
@@ -22,39 +37,16 @@ def start_gui(device_id: str | None = None):
 
     app = QApplication(sys.argv)
 
-    app.setStyleSheet("""
-        QWidget {
-            color: #E0E0E0;
-            font-family: 'Segoe UI', Inter, sans-serif;
-            font-size: 14px;
-            background: transparent;
-        }
-        QScrollArea {
-            border: none;
-            background-color: transparent;
-        }
-        QScrollBar:vertical {
-            border: none;
-            background: #2C2C2C;
-            width: 10px;
-            margin: 0px;
-        }
-        QScrollBar::handle:vertical {
-            background: #555555;
-            min-height: 20px;
-            border-radius: 5px;
-        }
-        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-            border: none;
-            background: none;
-        }
-    """)
+    app.setStyleSheet(theme.app_stylesheet())
 
     signals = PipelineSignals()
 
     window = CopilotMainWindow()
-    window.set_status("⏳ Loading models...")
+    window.set_status("Loading models...")
+    window.set_pipeline_ready(False)
     window.show()
+    window.install_global_hotkey()
+    window.setup_tray()
 
     # Populate profile/device lists early
     profile_mgr = ProfileManager()
@@ -81,22 +73,24 @@ def start_gui(device_id: str | None = None):
     signals.suggestion_token.connect(window.append_token)
 
     def on_error_signal(msg: str, transient: bool = False):
-        window.set_error(msg, transient=transient)
+        window.set_error(msg, transient=transient, source=error_source(msg))
 
     signals.error_occurred.connect(on_error_signal)
     signals.status_changed.connect(window.set_status)
 
     def on_audio_status(is_connected: bool, msg: str):
         if is_connected:
-            window.clear_persistent_error()
-            if not window._has_persistent_error:
+            window.clear_persistent_error(source="audio")
+            if not window.has_persistent_error:
                 window.set_status("")
         else:
-            window.set_status(msg)
+            window.set_error(msg, source="audio")
 
     signals.audio_status_changed.connect(on_audio_status)
 
     pipeline_ref = []
+    pipeline_ready = False
+    keys_reload_pending = False
 
     def run_pipeline():
         try:
@@ -136,18 +130,58 @@ def start_gui(device_id: str | None = None):
                 transcript_remove_callback=on_transcript_remove,
             )
 
+            async def start_and_signal_ready():
+                task = asyncio.ensure_future(pipeline.start(device_id))
+                # start() clears the pause event; let it run before the GUI enables Pause.
+                await asyncio.sleep(0)
+                if not task.done():
+                    signals.pipeline_ready.emit()
+                await task
+
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                loop.run_until_complete(pipeline.start(device_id))
+                loop.run_until_complete(start_and_signal_ready())
             finally:
                 loop.close()
         except Exception as e:
             logger.error(f"Pipeline thread error: {e}")
-            signals.status_changed.emit(f"❌ Error: {e}")
+            signals.status_changed.emit(f"Error: {e}")
+
+    def reload_api_keys():
+        reload = getattr(pipeline_ref[0], "reload_api_keys", None)
+        if reload is None:
+            window.set_error("API keys saved. Restart to apply them.", transient=True)
+            return
+        try:
+            reload()
+        except Exception as e:
+            logger.error(f"Failed to reload API keys: {e}")
+            window.set_error(f"Failed to apply API keys: {e}", transient=True)
+            return
+        if config.OPENROUTER_API_KEY:
+            window.clear_persistent_error(source="openrouter")
+
+    def on_pipeline_ready():
+        nonlocal pipeline_ready, keys_reload_pending
+        pipeline_ready = True
+        window.set_pipeline_ready(True)
+        if keys_reload_pending:
+            keys_reload_pending = False
+            reload_api_keys()
+
+    signals.pipeline_ready.connect(on_pipeline_ready)
+
+    def on_settings_saved():
+        nonlocal keys_reload_pending
+        if pipeline_ready:
+            reload_api_keys()
+        else:
+            keys_reload_pending = True
 
     def on_quit():
         window.save_geometry()
+        window.release_global_hotkey()
         if pipeline_ref:
             pipeline_ref[0].stop()
 
@@ -159,7 +193,7 @@ def start_gui(device_id: str | None = None):
             if not ok:
                 window.set_error(f"Failed to load profile: {name}", transient=True)
             else:
-                window.clear_persistent_error()
+                window.clear_persistent_error(source="profile")
                 window.set_status(f"Profile: {name}")
 
     def on_device_changed(new_id):
@@ -184,6 +218,7 @@ def start_gui(device_id: str | None = None):
     window.on_device_changed = on_device_changed
     window.on_pause_toggled = on_pause_toggled
     window.on_clear_history = on_clear_history
+    window.on_settings_saved = on_settings_saved
 
     pipeline_thread = threading.Thread(target=run_pipeline, daemon=True)
     pipeline_thread.start()

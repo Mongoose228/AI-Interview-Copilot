@@ -80,6 +80,9 @@ class Settings(BaseSettings):
     # Debounce: seconds of silence after last transcript before sending to LLM.
     # Lower default when using fast cloud STT; raise for Whisper-only CPU.
     LLM_DEBOUNCE_DELAY_S: float = 0.25
+    # Upper bound on waiting for VAD speech-end before flushing to the LLM anyway
+    # (continuous background audio can keep VAD "speaking" indefinitely).
+    LLM_MAX_WAIT_FOR_SPEECH_END_S: float = 4.0
 
     # Partial STT settings (bounded to one in-flight CPU inference)
     PARTIAL_TRANSCRIPTION_ENABLED: bool = True

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 
 from ..logging_config import logger
 from ..models import SpeechPhrase, Transcript
@@ -10,10 +11,14 @@ from .base import SttEngine, TranscriptCallback
 
 
 class FailoverSttEngine(SttEngine):
+    # After tripping, batch transcription retries the primary once this cooldown elapses.
+    _RETRY_PRIMARY_AFTER_S = 60.0
+
     def __init__(self, primary: SttEngine, fallback: SttEngine):
         self.primary = primary
         self.fallback = fallback
         self._use_fallback = False
+        self._tripped_at = 0.0
         self._lock = threading.Lock()
         self._active_stream: SttEngine | None = None
 
@@ -47,17 +52,28 @@ class FailoverSttEngine(SttEngine):
 
     def _trip_to_fallback(self, reason: str) -> None:
         with self._lock:
+            self._tripped_at = time.monotonic()
             if self._use_fallback:
                 return
             self._use_fallback = True
         logger.warning(f"STT failover engaged: {reason}")
 
+    def _maybe_retry_primary(self) -> None:
+        with self._lock:
+            if (
+                self._use_fallback
+                and self._active_stream is None
+                and time.monotonic() - self._tripped_at >= self._RETRY_PRIMARY_AFTER_S
+            ):
+                self._use_fallback = False
+                logger.info("STT failover: retrying primary engine")
+
     def transcribe(self, phrase: SpeechPhrase) -> Transcript:
+        self._maybe_retry_primary()
         eng = self._active()
         try:
-            result = eng.transcribe(phrase)
             # Empty text on final is not necessarily a hard failure.
-            return result
+            return eng.transcribe(phrase)
         except Exception as e:
             if eng is self.primary and self.fallback.is_available:
                 self._trip_to_fallback(str(e))

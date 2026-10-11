@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -16,41 +17,72 @@ from PySide6.QtWidgets import (
 
 from ..config import config
 from ..settings_store import load_prefs, save_prefs
+from . import theme
 
 
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Settings")
-        self.setMinimumWidth(420)
-        self.setStyleSheet("""
-            QDialog { background-color: #2a2a2a; color: #E0E0E0; }
-            QLabel { color: #CCCCCC; }
-            QLineEdit, QComboBox {
-                background-color: #1e1e1e; color: #E0E0E0;
-                border: 1px solid #555; border-radius: 4px; padding: 4px;
-            }
-        """)
+        self.setWindowTitle("Settings — AI Interview Copilot")
+        self.setMinimumWidth(460)
+        self.setStyleSheet(theme.settings_dialog_style())
 
         prefs = load_prefs()
         secrets = prefs.get("secrets") or {}
         settings = prefs.get("settings") or {}
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(10)
+
+        brand = QLabel("AI Interview Copilot")
+        brand.setStyleSheet(
+            f"color: {theme.TEXT_PRIMARY}; font-size: 16px; font-weight: 600;"
+        )
+        layout.addWidget(brand)
+        subtitle = QLabel("Keys, STT backend, and capture options")
+        subtitle.setStyleSheet(theme.caption_style())
+        layout.addWidget(subtitle)
+
+        # One form so the label column lines up across sections.
         form = QFormLayout()
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(8)
+        form.setContentsMargins(0, 4, 0, 0)
+        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
+        def section(title: str) -> None:
+            hdr = QLabel(title)
+            hdr.setObjectName("SectionHeader")
+            form.addRow(hdr)
+
+        section("API KEYS")
 
         self.openrouter = QLineEdit(
             secrets.get("OPENROUTER_API_KEY") or config.OPENROUTER_API_KEY or ""
         )
         self.openrouter.setEchoMode(QLineEdit.Password)
+        self.openrouter.setPlaceholderText("Required for AI suggestions")
         self.deepgram = QLineEdit(
             secrets.get("DEEPGRAM_API_KEY") or config.DEEPGRAM_API_KEY or ""
         )
         self.deepgram.setEchoMode(QLineEdit.Password)
         self.groq = QLineEdit(secrets.get("GROQ_API_KEY") or config.GROQ_API_KEY or "")
         self.groq.setEchoMode(QLineEdit.Password)
+        self.soniox = QLineEdit(
+            secrets.get("SONIOX_API_KEY") or config.SONIOX_API_KEY or ""
+        )
+        self.soniox.setEchoMode(QLineEdit.Password)
         self.deepl = QLineEdit(secrets.get("DEEPL_API_KEY") or config.DEEPL_API_KEY or "")
         self.deepl.setEchoMode(QLineEdit.Password)
+
+        form.addRow("OpenRouter", self.openrouter)
+        form.addRow("Deepgram (optional)", self.deepgram)
+        form.addRow("Groq (optional)", self.groq)
+        form.addRow("Soniox (optional)", self.soniox)
+        form.addRow("DeepL", self.deepl)
+
+        section("SPEECH TO TEXT")
 
         self.stt_backend = QComboBox()
         # Local first; cloud backends optional / paid — not recommended by default.
@@ -64,6 +96,14 @@ class SettingsDialog(QDialog):
             settings.get("AUDIO_MIC_DEVICE") or config.AUDIO_MIC_DEVICE or ""
         )
         self.mic_device.setPlaceholderText("Mic device id (optional, dual-channel)")
+
+        form.addRow("STT backend", self.stt_backend)
+        form.addRow("Mic device id", self.mic_device)
+        layout.addLayout(form)
+
+        opts_hdr = QLabel("OPTIONS")
+        opts_hdr.setObjectName("SectionHeader")
+        layout.addWidget(opts_hdr)
 
         self.dual_path = QCheckBox(
             "Fast provisional STT (tiny.en) + quality final (base.en / selected backend)"
@@ -81,26 +121,22 @@ class SettingsDialog(QDialog):
         self.denoise.setChecked(
             bool(settings.get("DSP_DENOISE_ENABLED", config.DSP_DENOISE_ENABLED))
         )
-
-        form.addRow("OpenRouter API key", self.openrouter)
-        form.addRow("Deepgram API key (optional, paid)", self.deepgram)
-        form.addRow("Groq API key (optional)", self.groq)
-        form.addRow("DeepL API key", self.deepl)
-        form.addRow("STT backend", self.stt_backend)
-        form.addRow("Mic device id", self.mic_device)
-        layout.addLayout(form)
         layout.addWidget(self.dual_path)
         layout.addWidget(self.dual_channel)
         layout.addWidget(self.denoise)
-        layout.addWidget(
-            QLabel(
-                "Recommended: STT = whisper (local, free). "
-                "Deepgram/Groq/Soniox are optional paid cloud backends. "
-                "Backend changes apply on next app restart."
-            )
+
+        hint = QLabel(
+            "Recommended: STT = whisper (local, free). "
+            "Deepgram/Groq/Soniox are optional paid cloud backends. "
+            "API keys apply immediately; STT backend, fast provisional STT, "
+            "and microphone capture changes apply after restart."
         )
+        hint.setObjectName("HintLabel")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Save).setDefault(True)
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
         row = QHBoxLayout()
@@ -114,6 +150,7 @@ class SettingsDialog(QDialog):
             "OPENROUTER_API_KEY": self.openrouter.text().strip(),
             "DEEPGRAM_API_KEY": self.deepgram.text().strip(),
             "GROQ_API_KEY": self.groq.text().strip(),
+            "SONIOX_API_KEY": self.soniox.text().strip(),
             "DEEPL_API_KEY": self.deepl.text().strip(),
         }
         prefs["settings"] = {
@@ -125,10 +162,9 @@ class SettingsDialog(QDialog):
             "DSP_DENOISE_ENABLED": self.denoise.isChecked(),
         }
         save_prefs(prefs)
-        # Hot-apply keys / flags that are safe without rebuild.
+        # Running engines only see new keys after InterviewPipeline.reload_api_keys().
         for key, value in prefs["secrets"].items():
-            if value:
-                object.__setattr__(config, key, value)
+            object.__setattr__(config, key, value or None)
         object.__setattr__(config, "STT_BACKEND", prefs["settings"]["STT_BACKEND"])
         object.__setattr__(
             config, "STT_DUAL_PATH_ENABLED", prefs["settings"]["STT_DUAL_PATH_ENABLED"]

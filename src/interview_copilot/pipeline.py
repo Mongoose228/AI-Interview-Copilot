@@ -4,12 +4,13 @@ import threading
 import time
 from typing import Literal
 
-from .audio.dsp import float32_to_pcm16
+from .audio.dsp import float32_to_pcm16, to_mono
 from .audio.dual_capture import DualAudioCapture
 from .audio.soundcard_wasapi import SoundCardWASAPIBackend
 from .config import config
 from .logging_config import log_sensitive, logger
 from .models import PipelineResult, StageTiming, SuggestionStatus, Transcript
+from .stt.base import SttError
 from .stt.dual_path import DualPathSttEngine
 from .stt.factory import build_stt_engine
 from .stt.keyterms import build_initial_prompt, extract_keyterms
@@ -56,12 +57,9 @@ class InterviewPipeline:
             and self.stt.is_available
             and config.STT_BACKEND in {"deepgram"}
         )
-        # Cloud streaming owns utterance finals; disable Whisper-style VAD partials.
+        # Cloud streaming owns finals and interim partials; VAD phrases are not transcribed.
         self._use_vad_partials = (
             config.PARTIAL_TRANSCRIPTION_ENABLED and not self._streaming_stt
-        )
-        self._cloud_endpointing = bool(
-            self._streaming_stt and config.STT_CLOUD_ENDPOINTING
         )
 
         if translator is ...:
@@ -110,6 +108,7 @@ class InterviewPipeline:
             "none", "no_key", "no_profile"
         ] = "none"
         self._tokens_seen: set = set()  # phrase ids that received stream tokens
+        self._background_tasks: set = set()
 
     def set_callbacks(
         self,
@@ -172,6 +171,33 @@ class InterviewPipeline:
         self._apply_profile_to_stt(snapshot.content)
         return True
 
+    def reload_api_keys(self) -> None:
+        """Rebuild key-dependent clients from current ``config``; safe from any thread."""
+        suggester = OpenRouterSuggester()
+        with self._profile_lock:
+            has_profile = self._active_profile is not None
+            self.suggester = suggester
+            if not suggester.is_configured:
+                self._suggestions_disabled_reason = "no_key"
+            elif not has_profile:
+                self._suggestions_disabled_reason = "no_profile"
+            else:
+                self._suggestions_disabled_reason = "none"
+
+        if config.TRANSLATION_BACKEND == "deepl" and not getattr(
+            self.translator, "is_available", False
+        ):
+            self.translator = DeepLTranslator()
+
+        loop = self._loop
+        if suggester.is_configured and loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(self._schedule_warm_up, suggester)
+
+    def _schedule_warm_up(self, suggester) -> None:
+        task = asyncio.ensure_future(suggester.warm_up())
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
     def _apply_profile_to_stt(self, profile_text: str) -> None:
         if not config.STT_KEYTERMS_FROM_PROFILE:
             return
@@ -204,12 +230,10 @@ class InterviewPipeline:
     def clear_history(self):
         self.transcript_history.clear()
 
+    # Audio objects are stopped only by the capture thread (WASAPI/COM isn't
+    # safe to tear down cross-thread); these just signal it.
     def pause_capture(self):
         self._pause_event.set()
-        try:
-            self.audio.stop()
-        except Exception as e:
-            logger.warning(f"Error pausing audio: {e}")
         if self._status_callback:
             self._status_callback("Paused")
 
@@ -221,15 +245,12 @@ class InterviewPipeline:
 
     def change_device(self, device_id: str | None):
         self._device_id = device_id
-        try:
-            self.audio.stop()
-        except Exception as e:
-            logger.warning(f"Error stopping audio for device change: {e}")
         self._restart_capture.set()
 
     def _process_mic_chunks(self) -> bool:
         """
-        Drain candidate mic audio into a separate VAD.
+        Drain candidate mic audio into a separate VAD (echo suppression only;
+        candidate speech is never transcribed).
         Returns True while the candidate is speaking (or briefly after),
         so loopback STT/LLM can be suppressed against speaker echo.
         """
@@ -248,8 +269,6 @@ class InterviewPipeline:
             except Exception as e:
                 logger.debug(f"Mic VAD error: {e}")
                 continue
-            for p in mic_phrases:
-                self._enqueue_final(p)
             if self.mic_vad.is_speaking or mic_phrases:
                 # Hold suppress a bit after speech so loopback echo dies out.
                 self._mic_speaking_until = time.time() + 0.45
@@ -294,7 +313,6 @@ class InterviewPipeline:
                         logger.error(f"Failed to start STT stream: {e}")
                         self._streaming_stt = False
                         self._use_vad_partials = config.PARTIAL_TRANSCRIPTION_ENABLED
-                        self._cloud_endpointing = False
 
                 if self._audio_status_callback:
                     self._audio_status_callback(True, "Audio capture active")
@@ -312,29 +330,30 @@ class InterviewPipeline:
                             break
                         raise
 
-                    # Candidate mic path: VAD + optional STT (LLM skipped in orchestrator).
                     mic_speaking = self._process_mic_chunks()
 
                     # Feed cloud streaming STT (PCM16 @ 16 kHz mono) — loopback only.
+                    # While the mic is active nothing is sent; Deepgram KeepAlive holds the socket.
                     if self._streaming_stt and not mic_speaking:
                         try:
-                            pcm = float32_to_pcm16(chunk.data.reshape(-1))
-                            self.stt.feed_audio(pcm, chunk.sample_rate)
+                            mono = to_mono(chunk.data, mode=config.DSP_MONO_MODE)
+                            self.stt.feed_audio(float32_to_pcm16(mono), chunk.sample_rate)
                         except Exception as e:
                             logger.debug(f"STT feed_audio error: {e}")
 
+                    # VAD still runs in streaming mode so the orchestrator knows
+                    # when speech is ongoing, but streaming owns finals and partials.
                     phrases = self.vad.process_chunk(chunk)
-                    if not self._cloud_endpointing:
-                        for p in phrases:
-                            if mic_speaking and config.AUDIO_SUPPRESS_LOOPBACK_WHILE_MIC:
-                                logger.debug(
-                                    "Suppressing loopback phrase while candidate mic active"
-                                )
-                                continue
-                            self._enqueue_final(p)
-                    elif phrases and isinstance(self.stt, DualPathSttEngine):
-                        # Still allow local provisional while cloud owns finals.
-                        pass
+                    if self._streaming_stt:
+                        continue
+
+                    for p in phrases:
+                        if mic_speaking and config.AUDIO_SUPPRESS_LOOPBACK_WHILE_MIC:
+                            logger.debug(
+                                "Suppressing loopback phrase while candidate mic active"
+                            )
+                            continue
+                        self._enqueue_final(p)
 
                     if (
                         self._use_vad_partials
@@ -344,29 +363,9 @@ class InterviewPipeline:
                     ):
                         partial = self.vad.get_partial_snapshot()
                         if partial:
-                            if isinstance(self.stt, DualPathSttEngine):
-                                prov = self.stt.maybe_provisional(partial)
-                                if prov and self._loop and self.transcript_queue:
-                                    self._loop.call_soon_threadsafe(
-                                        self.transcript_queue.put_nowait, prov
-                                    )
-                            else:
-                                self._enqueue_partial(partial)
-                    elif (
-                        self._streaming_stt
-                        and not mic_speaking
-                        and isinstance(self.stt, DualPathSttEngine)
-                        and not self._stt_busy.is_set()
-                    ):
-                        partial = self.vad.get_partial_snapshot()
-                        if partial:
-                            prov = self.stt.maybe_provisional(partial)
-                            if prov and self._loop and self.transcript_queue:
-                                self._loop.call_soon_threadsafe(
-                                    self.transcript_queue.put_nowait, prov
-                                )
+                            self._enqueue_partial(partial)
 
-            except (RuntimeError, ValueError, TypeError, OSError) as e:
+            except Exception as e:
                 if self._stop_event.is_set() or self._pause_event.is_set():
                     break
                 if self._restart_capture.is_set():
@@ -380,7 +379,7 @@ class InterviewPipeline:
                 logger.error(f"Capture worker error: {e}")
                 try:
                     self.audio.stop()
-                except (RuntimeError, ValueError, TypeError) as stop_err:
+                except Exception as stop_err:
                     logger.warning(f"Error ignored: {stop_err}")
 
                 retries += 1
@@ -413,7 +412,7 @@ class InterviewPipeline:
                         logger.debug(f"STT close_stream: {e}")
                 try:
                     self.audio.stop()
-                except (RuntimeError, ValueError, TypeError) as stop_err:
+                except Exception as stop_err:
                     logger.warning(f"Error ignored: {stop_err}")
 
         logger.info("Audio capture thread stopped.")
@@ -421,54 +420,65 @@ class InterviewPipeline:
     def _stt_worker(self):
         logger.info("STT thread started.")
         while not self._stop_event.is_set():
+            # Finals always win over partials.
             try:
+                phrase = self.phrase_queue.get_nowait()
+            except queue.Empty:
                 try:
-                    phrase = self.phrase_queue.get_nowait()
+                    phrase = self.partial_phrase_queue.get(timeout=0.2)
                 except queue.Empty:
-                    try:
-                        phrase = self.partial_phrase_queue.get(timeout=0.2)
-                    except queue.Empty:
-                        continue
-                if phrase is None:
-                    break
-                if not hasattr(phrase, "audio_data"):
                     continue
-                if not phrase.is_final:
-                    with self._phrase_state_lock:
-                        if phrase.id in self._final_phrase_ids:
-                            continue
-                if self._status_callback:
-                    self._status_callback("Transcribing…")
-                self._stt_busy.set()
-                try:
-                    transcript = self.stt.transcribe(phrase)
-                finally:
-                    self._stt_busy.clear()
+            if phrase is None:
+                break
+            if not hasattr(phrase, "audio_data"):
+                continue
+            try:
+                self._transcribe_phrase(phrase)
+            except SttError as e:
+                logger.error(f"STT worker error: {e}")
+                self._emit_error(f"Transcription error: {e}", transient=True)
+            except Exception as e:
+                logger.exception(f"STT worker error: {e}")
+                self._emit_error(f"Transcription error: {e}", transient=True)
+            finally:
                 if phrase.is_final:
                     with self._phrase_state_lock:
                         self._final_phrase_ids.discard(phrase.id)
-                if (
-                    (transcript.text_en or transcript.is_final)
-                    and self._loop
-                    and self.transcript_queue
-                ):
-                    if transcript.is_final and transcript.speech_ended_at:
-                        logger.info(
-                            "[Latency] speech_end_to_final_stt_ready="
-                            f"{max(0.0, transcript.stt_ended_at - transcript.speech_ended_at):.3f}s"
-                        )
-                    self._loop.call_soon_threadsafe(
-                        self.transcript_queue.put_nowait, transcript
-                    )
-                elif self._status_callback and not self._pause_event.is_set():
-                    self._status_callback("Listening…")
-            except queue.Empty:
-                continue
-            except (RuntimeError, ValueError, TypeError, OSError) as e:
-                logger.error(f"STT worker error: {e}")
-                if self._error_callback:
-                    self._error_callback(f"Transcription error: {e}", transient=True)
         logger.info("STT thread stopped.")
+
+    def _transcribe_phrase(self, phrase) -> None:
+        if not phrase.is_final:
+            with self._phrase_state_lock:
+                if phrase.id in self._final_phrase_ids:
+                    return
+        if self._status_callback:
+            self._status_callback("Transcribing…")
+        self._stt_busy.set()
+        try:
+            if phrase.is_final:
+                transcript = self.stt.transcribe(phrase)
+            elif isinstance(self.stt, DualPathSttEngine):
+                # Partials are UI-only: use the fast provisional model, never the final engine.
+                transcript = self.stt.maybe_provisional(phrase)
+            else:
+                transcript = self.stt.transcribe(phrase)
+        finally:
+            self._stt_busy.clear()
+
+        if (
+            transcript is not None
+            and (transcript.text_en or transcript.is_final)
+            and self._loop
+            and self.transcript_queue
+        ):
+            if transcript.is_final and transcript.speech_ended_at:
+                logger.info(
+                    "[Latency] speech_end_to_final_stt_ready="
+                    f"{max(0.0, transcript.stt_ended_at - transcript.speech_ended_at):.3f}s"
+                )
+            self._loop.call_soon_threadsafe(self.transcript_queue.put_nowait, transcript)
+        elif self._status_callback and not self._pause_event.is_set():
+            self._status_callback("Listening…")
 
     def _emit_error(self, msg: str, *, transient: bool = False):
         if self._error_callback:
@@ -487,7 +497,8 @@ class InterviewPipeline:
             StageTiming(
                 stage_name="STT",
                 started_at=transcript.stt_started_at,
-                ended_at=transcript.stt_ended_at or transcript.stt_duration_s,
+                ended_at=transcript.stt_ended_at
+                or transcript.stt_started_at + transcript.stt_duration_s,
                 duration_s=transcript.stt_duration_s,
             )
         ]
@@ -557,15 +568,15 @@ class InterviewPipeline:
         translation_ru = None
         suggestion = None
 
+        async def _none():
+            return None
+
         try:
-            if translation_coro and suggestion_coro:
-                translation_ru, suggestion = await asyncio.gather(
-                    translation_coro, suggestion_coro
-                )
-            elif translation_coro:
-                translation_ru = await translation_coro
-            elif suggestion_coro:
-                suggestion = await suggestion_coro
+            translation_res, suggestion_res = await asyncio.gather(
+                translation_coro or _none(),
+                suggestion_coro or _none(),
+                return_exceptions=True,
+            )
         except asyncio.CancelledError:
             status = (
                 SuggestionStatus.INTERRUPTED
@@ -585,10 +596,17 @@ class InterviewPipeline:
             if self._suggestion_callback:
                 self._suggestion_callback(result)
             raise
-        except Exception as e:
-            logger.error(f"Processing error: {e}")
-            self._emit_error(f"Processing error: {e}", transient=True)
+
+        if isinstance(translation_res, BaseException):
+            logger.warning(f"Translation failed: {translation_res}")
+        else:
+            translation_ru = translation_res
+        if isinstance(suggestion_res, BaseException):
+            logger.error(f"Processing error: {suggestion_res}")
+            self._emit_error(f"Processing error: {suggestion_res}", transient=True)
             suggestion_status = SuggestionStatus.FAILED
+        else:
+            suggestion = suggestion_res
 
         if suggestion_coro is not None:
             if suggestion is None and suggestion_status == SuggestionStatus.PENDING:
@@ -655,7 +673,6 @@ class InterviewPipeline:
 
         await self.suggester.warm_up()
 
-        self._background_tasks = set()
         current_llm_task = None
         pending_transcripts: list[Transcript] = []
         debounce_task: asyncio.Task | None = None
@@ -684,8 +701,9 @@ class InterviewPipeline:
 
             await asyncio.sleep(config.LLM_DEBOUNCE_DELAY_S)
             # A new phrase may already be in progress before its first partial STT result.
-            # Keep the current question open until VAD finalizes that phrase.
-            while getattr(self.vad, "is_speaking", False):
+            # Keep the current question open until VAD finalizes that phrase (bounded).
+            deadline = time.monotonic() + config.LLM_MAX_WAIT_FOR_SPEECH_END_S
+            while getattr(self.vad, "is_speaking", False) and time.monotonic() < deadline:
                 await asyncio.sleep(0.05)
 
             if not pending_transcripts:
@@ -763,6 +781,7 @@ class InterviewPipeline:
 
             def on_task_done(t):
                 self._background_tasks.discard(t)
+                self._tokens_seen.discard(card_id)
                 try:
                     exc = t.exception()
                     if exc and not isinstance(exc, asyncio.CancelledError):
@@ -990,37 +1009,32 @@ class InterviewPipeline:
         self._pause_event.clear()
 
         try:
+            self.phrase_queue.put_nowait(None)
+        except queue.Full:
+            pass
+
+        # The capture thread stops its own audio/stream; the calls below are a safety net.
+        for t in self._threads:
+            t.join(timeout=3.0)
+            if t.is_alive():
+                logger.warning(f"Thread {t.name} did not terminate in time.")
+
+        try:
             if self._streaming_stt:
                 self.stt.close_stream()
         except Exception as e:
             logger.debug(f"STT close_stream during stop: {e}")
-
-        # Flush any in-progress speech before tearing down audio
-        try:
-            flushed = self.vad.flush()
-            if flushed and not self._cloud_endpointing:
-                try:
-                    self.phrase_queue.put_nowait(flushed)
-                except queue.Full:
-                    pass
-        except Exception as e:
-            logger.warning(f"VAD flush during stop failed: {e}")
 
         try:
             self.audio.stop()
         except Exception as e:
             logger.warning(f"Error stopping audio during shutdown: {e}")
 
+        # Workers are gone, so an in-progress phrase can't be transcribed; discard it.
         try:
-            self.phrase_queue.put_nowait(None)
-        except queue.Full:
-            pass
-
-        for t in self._threads:
-            t.join(timeout=3.0)
-            if t.is_alive():
-                logger.warning(f"Thread {t.name} did not terminate in time.")
-
+            self.vad.flush()
+        except Exception as e:
+            logger.warning(f"VAD flush during stop failed: {e}")
         self.vad.reset()
 
         while not self.phrase_queue.empty():

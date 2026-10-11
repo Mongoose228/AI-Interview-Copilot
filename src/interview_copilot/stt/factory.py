@@ -41,7 +41,7 @@ def _build_fallback(name: str) -> SttEngine:
         return GroqWhisperEngine()
     if name == "soniox":
         return SonioxEngine()
-    return WhisperEngine(model_size=config.WHISPER_MODEL)
+    return WhisperEngine(model_size=config.WHISPER_MODEL, skip_if_unavailable=True)
 
 
 def _wrap_dual_path(engine: SttEngine, primary_name: str) -> SttEngine:

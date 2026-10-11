@@ -67,6 +67,8 @@ class DualAudioCapture(AudioCaptureBackend):
 
     def start(self, device_id: str | None = None) -> None:
         self._stop.clear()
+        with self._mic_lock:
+            self._mic_queue.clear()
         self.loopback.start(device_id)
         self._running = True
         if not self._mic_enabled:

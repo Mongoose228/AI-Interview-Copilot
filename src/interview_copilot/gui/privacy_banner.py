@@ -2,6 +2,7 @@
 
 import json
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -12,6 +13,7 @@ from PySide6.QtWidgets import (
 
 from ..logging_config import logger
 from ..paths import get_privacy_state_path
+from . import theme
 
 _STATE_KEY = "privacy_accepted_v3"
 
@@ -48,22 +50,19 @@ class PrivacyBanner(QFrame):
             self.setVisible(False)
             return
 
-        self.setStyleSheet("""
-            PrivacyBanner {
-                background-color: rgba(50, 40, 20, 0.8);
-                border: 1px solid rgba(255, 183, 77, 0.5);
-                border-radius: 8px;
-                margin-bottom: 10px;
-            }
-            QLabel { background: transparent; }
-        """)
+        self.setStyleSheet(theme.privacy_banner_style())
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(8)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(10)
+
+        title = QLabel("Privacy notice")
+        title.setStyleSheet(
+            f"color: {theme.TEXT_WARN}; font-size: 13px; font-weight: 600;"
+        )
+        layout.addWidget(title)
 
         lbl = QLabel(
-            "⚠️ <b>Privacy Notice</b><br>"
             "By default, speech is transcribed <b>locally with Whisper</b> "
             "(audio stays on your machine). "
             "Suggestions send transcripts and your candidate profile to "
@@ -71,28 +70,16 @@ class PrivacyBanner(QFrame):
             "or DeepL translation only run if you enable them and add keys."
         )
         lbl.setWordWrap(True)
-        lbl.setStyleSheet("color: #FFB74D; font-size: 12px;")
+        lbl.setStyleSheet(f"color: {theme.TEXT_SECONDARY}; font-size: 12px;")
         layout.addWidget(lbl)
 
         btn_row = QHBoxLayout()
         btn_row.addStretch()
 
         btn = QPushButton("I Understand")
+        btn.setCursor(Qt.PointingHandCursor)
         btn.setFixedWidth(140)
-        btn.setStyleSheet("""
-            QPushButton {
-                background-color: rgba(255, 183, 77, 0.3);
-                color: #FFB74D;
-                border: 1px solid rgba(255, 183, 77, 0.5);
-                border-radius: 6px;
-                padding: 6px 16px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: rgba(255, 183, 77, 0.5);
-                color: #FFFFFF;
-            }
-        """)
+        btn.setStyleSheet(theme.privacy_button_style())
         btn.clicked.connect(self._accept)
         btn_row.addWidget(btn)
         layout.addLayout(btn_row)

@@ -6,6 +6,7 @@ import numpy as np
 from interview_copilot.audio.soundcard_wasapi import SoundCardWASAPIBackend
 from interview_copilot.config import config
 from interview_copilot.pipeline import InterviewPipeline
+from interview_copilot.settings_store import apply_prefs_to_config
 from interview_copilot.stt.factory import build_stt_engine
 from interview_copilot.vad.silero import SileroVAD
 
@@ -303,6 +304,7 @@ def main():
     parser_profile_set.set_defaults(func=cmd_profile_set)
 
     args = parser.parse_args()
+    apply_prefs_to_config()
     args.func(args)
 
 
