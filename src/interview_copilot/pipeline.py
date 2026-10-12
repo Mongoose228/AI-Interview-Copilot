@@ -52,15 +52,7 @@ class InterviewPipeline:
         self._mic_speaking_until = 0.0
 
         self.stt = stt or build_stt_engine()
-        self._streaming_stt = bool(
-            getattr(self.stt, "supports_streaming", lambda: False)()
-            and self.stt.is_available
-            and config.STT_BACKEND in {"deepgram"}
-        )
-        # Cloud streaming owns finals and interim partials; VAD phrases are not transcribed.
-        self._use_vad_partials = (
-            config.PARTIAL_TRANSCRIPTION_ENABLED and not self._streaming_stt
-        )
+        self._refresh_streaming_mode()
 
         if translator is ...:
             self.translator = None
@@ -171,11 +163,23 @@ class InterviewPipeline:
         self._apply_profile_to_stt(snapshot.content)
         return True
 
+    def _refresh_streaming_mode(self) -> None:
+        self._streaming_stt = bool(
+            getattr(self.stt, "supports_streaming", lambda: False)()
+            and self.stt.is_available
+            and config.STT_BACKEND in {"deepgram"}
+        )
+        # Cloud streaming owns finals and interim partials; VAD phrases are not transcribed.
+        self._use_vad_partials = (
+            config.PARTIAL_TRANSCRIPTION_ENABLED and not self._streaming_stt
+        )
+
     def reload_api_keys(self) -> None:
         """Rebuild key-dependent clients from current ``config``; safe from any thread."""
         suggester = OpenRouterSuggester()
         with self._profile_lock:
             has_profile = self._active_profile is not None
+            old_suggester = self.suggester
             self.suggester = suggester
             if not suggester.is_configured:
                 self._suggestions_disabled_reason = "no_key"
@@ -184,19 +188,44 @@ class InterviewPipeline:
             else:
                 self._suggestions_disabled_reason = "none"
 
-        if config.TRANSLATION_BACKEND == "deepl" and not getattr(
-            self.translator, "is_available", False
+        if config.TRANSLATION_BACKEND == "deepl" and (
+            not getattr(self.translator, "is_available", False)
+            or getattr(self.translator, "_api_key", None) != config.DEEPL_API_KEY
         ):
             self.translator = DeepLTranslator()
 
-        loop = self._loop
-        if suggester.is_configured and loop is not None and loop.is_running():
-            loop.call_soon_threadsafe(self._schedule_warm_up, suggester)
+        stt_key_changed = False
+        try:
+            stt_key_changed = self.stt.reload_api_key()
+        except Exception as e:
+            logger.warning(f"Failed to reload STT API key: {e}")
+        if stt_key_changed:
+            was_streaming = self._streaming_stt
+            self._refresh_streaming_mode()
+            if was_streaming or self._streaming_stt:
+                # The capture loop reopens the stream with the new key on restart.
+                self._restart_capture.set()
 
-    def _schedule_warm_up(self, suggester) -> None:
-        task = asyncio.ensure_future(suggester.warm_up())
-        self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
+        loop = self._loop
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(self._schedule_key_swap, old_suggester, suggester)
+
+    def _schedule_key_swap(self, old_suggester, new_suggester) -> None:
+        coros = []
+        if old_suggester is not new_suggester and hasattr(old_suggester, "aclose"):
+
+            async def close_later():
+                # An in-flight answer may still be streaming on the old client.
+                await asyncio.sleep(config.NETWORK_READ_TIMEOUT + 5)
+                await old_suggester.aclose()
+
+            coros.append(close_later())
+        if new_suggester.is_configured:
+            coros.append(new_suggester.warm_up())
+        for coro in coros:
+            task = asyncio.ensure_future(coro)
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
     def _apply_profile_to_stt(self, profile_text: str) -> None:
         if not config.STT_KEYTERMS_FROM_PROFILE:
@@ -296,6 +325,8 @@ class InterviewPipeline:
                 self._stop_event.wait(0.2)
                 continue
 
+            # Tracked locally: reload_api_keys() may flip _streaming_stt mid-loop.
+            stream_open = False
             try:
                 current_device = self._device_id
                 self.audio.start(current_device)
@@ -309,6 +340,7 @@ class InterviewPipeline:
                 if self._streaming_stt:
                     try:
                         self.stt.start_stream(self._on_streaming_transcript)
+                        stream_open = True
                     except Exception as e:
                         logger.error(f"Failed to start STT stream: {e}")
                         self._streaming_stt = False
@@ -334,7 +366,7 @@ class InterviewPipeline:
 
                     # Feed cloud streaming STT (PCM16 @ 16 kHz mono) — loopback only.
                     # While the mic is active nothing is sent; Deepgram KeepAlive holds the socket.
-                    if self._streaming_stt and not mic_speaking:
+                    if stream_open and not mic_speaking:
                         try:
                             mono = to_mono(chunk.data, mode=config.DSP_MONO_MODE)
                             self.stt.feed_audio(float32_to_pcm16(mono), chunk.sample_rate)
@@ -344,7 +376,7 @@ class InterviewPipeline:
                     # VAD still runs in streaming mode so the orchestrator knows
                     # when speech is ongoing, but streaming owns finals and partials.
                     phrases = self.vad.process_chunk(chunk)
-                    if self._streaming_stt:
+                    if stream_open:
                         continue
 
                     for p in phrases:
@@ -405,7 +437,7 @@ class InterviewPipeline:
                 self._stop_event.wait(delay)
 
             finally:
-                if self._streaming_stt:
+                if stream_open:
                     try:
                         self.stt.close_stream()
                     except Exception as e:
@@ -663,7 +695,7 @@ class InterviewPipeline:
         if not self.suggester.is_configured:
             self._suggestions_disabled_reason = "no_key"
             self._emit_error(
-                "OpenRouter API key not set. Add OPENROUTER_API_KEY to .env.",
+                "OpenRouter API key not set. Add it in Settings or .env.",
             )
         elif not active_profile:
             self._suggestions_disabled_reason = "no_profile"

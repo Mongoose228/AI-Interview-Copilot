@@ -29,6 +29,14 @@ class GroqWhisperEngine(SttEngine):
     def set_initial_prompt(self, prompt: str | None) -> None:
         self._prompt = prompt
 
+    def reload_api_key(self) -> bool:
+        new_key = config.GROQ_API_KEY
+        if new_key == self._api_key:
+            return False
+        self._api_key = new_key
+        self._client = None
+        return True
+
     def _get_client(self) -> OpenAI:
         if self._client is None:
             self._client = OpenAI(

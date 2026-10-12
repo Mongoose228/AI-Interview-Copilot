@@ -16,7 +16,9 @@ _ERROR_SOURCES = (
     ("Audio device lost", "audio"),
     ("No candidate profile", "profile"),
     ("OpenRouter API key not set", "openrouter"),
+    ("DeepL translation unavailable", "deepl"),
 )
+_OPENROUTER_MISSING = "OpenRouter API key not set. Add it in Settings or .env."
 
 
 def error_source(msg: str) -> str | None:
@@ -149,7 +151,8 @@ def start_gui(device_id: str | None = None):
             signals.status_changed.emit(f"Error: {e}")
 
     def reload_api_keys():
-        reload = getattr(pipeline_ref[0], "reload_api_keys", None)
+        pipeline = pipeline_ref[0]
+        reload = getattr(pipeline, "reload_api_keys", None)
         if reload is None:
             window.set_error("API keys saved. Restart to apply them.", transient=True)
             return
@@ -159,8 +162,12 @@ def start_gui(device_id: str | None = None):
             logger.error(f"Failed to reload API keys: {e}")
             window.set_error(f"Failed to apply API keys: {e}", transient=True)
             return
-        if config.OPENROUTER_API_KEY:
+        if pipeline.suggester.is_configured:
             window.clear_persistent_error(source="openrouter")
+        else:
+            window.set_error(_OPENROUTER_MISSING, source="openrouter")
+        if getattr(pipeline.translator, "is_available", False):
+            window.clear_persistent_error(source="deepl")
 
     def on_pipeline_ready():
         nonlocal pipeline_ready, keys_reload_pending

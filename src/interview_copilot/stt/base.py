@@ -46,3 +46,7 @@ class SttEngine(ABC):
 
     def set_initial_prompt(self, prompt: str | None) -> None:
         return None
+
+    def reload_api_key(self) -> bool:
+        """Re-read the API key from ``config``; returns True if it changed."""
+        return False

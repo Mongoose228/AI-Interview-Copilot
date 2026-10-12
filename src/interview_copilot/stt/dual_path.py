@@ -66,6 +66,9 @@ class DualPathSttEngine(SttEngine):
         if self.local:
             self.local.set_initial_prompt(prompt)
 
+    def reload_api_key(self) -> bool:
+        return self.final.reload_api_key()
+
     def transcribe(self, phrase: SpeechPhrase) -> Transcript:
         return self.final.transcribe(phrase)
 

@@ -64,6 +64,14 @@ class DeepgramEngine(SttEngine):
     def set_keyterms(self, terms: list[str]) -> None:
         self._keyterms = list(terms or [])[:50]
 
+    def reload_api_key(self) -> bool:
+        new_key = config.DEEPGRAM_API_KEY
+        if new_key == self._api_key:
+            return False
+        # The HTTP client carries no auth state; a running stream must be restarted.
+        self._api_key = new_key
+        return True
+
     def _get_http_client(self) -> httpx.Client:
         with self._lock:
             if self._http is None:
@@ -280,6 +288,9 @@ class DeepgramEngine(SttEngine):
                 on_close=on_close,
             )
             self._ws_app = ws_app
+            # close_stream() may have run before ws_app was published; don't outlive it.
+            if self._stream_stop.is_set():
+                break
             try:
                 ws_app.run_forever(ping_interval=20, ping_timeout=10)
             except Exception as e:

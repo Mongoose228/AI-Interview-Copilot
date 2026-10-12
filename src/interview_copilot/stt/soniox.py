@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 
 import httpx
@@ -23,6 +24,8 @@ class SonioxEngine(SttEngine):
     def __init__(self, api_key: str | None = None):
         self._api_key = api_key if api_key is not None else config.SONIOX_API_KEY
         self._model = config.SONIOX_MODEL
+        self._http: httpx.Client | None = None
+        self._lock = threading.Lock()
 
     @property
     def is_available(self) -> bool:
@@ -30,6 +33,25 @@ class SonioxEngine(SttEngine):
 
     def supports_streaming(self) -> bool:
         return False
+
+    def reload_api_key(self) -> bool:
+        new_key = config.SONIOX_API_KEY
+        if new_key == self._api_key:
+            return False
+        self._api_key = new_key
+        return True
+
+    def _get_http_client(self) -> httpx.Client:
+        # Reused across phrases to avoid a TCP+TLS handshake per request.
+        with self._lock:
+            if self._http is None:
+                self._http = httpx.Client(
+                    timeout=httpx.Timeout(
+                        config.NETWORK_READ_TIMEOUT,
+                        connect=config.NETWORK_CONNECT_TIMEOUT,
+                    )
+                )
+            return self._http
 
     def transcribe(self, phrase: SpeechPhrase) -> Transcript:
         started = time.time()
@@ -53,15 +75,11 @@ class SonioxEngine(SttEngine):
             "language_hints": "en",
         }
         try:
-            with httpx.Client(
-                timeout=httpx.Timeout(
-                    config.NETWORK_READ_TIMEOUT,
-                    connect=config.NETWORK_CONNECT_TIMEOUT,
-                )
-            ) as client:
-                resp = client.post(url, params=params, content=pcm, headers=headers)
-                resp.raise_for_status()
-                payload = resp.json()
+            resp = self._get_http_client().post(
+                url, params=params, content=pcm, headers=headers
+            )
+            resp.raise_for_status()
+            payload = resp.json()
         except (httpx.HTTPError, ValueError) as e:
             logger.error(f"Soniox transcription failed: {e}")
             raise SttError(f"Soniox transcription failed: {e}") from e

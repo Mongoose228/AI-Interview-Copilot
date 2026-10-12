@@ -44,6 +44,15 @@ class FailoverSttEngine(SttEngine):
         self.primary.set_initial_prompt(prompt)
         self.fallback.set_initial_prompt(prompt)
 
+    def reload_api_key(self) -> bool:
+        changed = self.primary.reload_api_key()
+        changed = self.fallback.reload_api_key() or changed
+        if changed:
+            # A new key may fix whatever tripped failover; let the primary try again.
+            with self._lock:
+                self._use_fallback = False
+        return changed
+
     def _active(self) -> SttEngine:
         with self._lock:
             if self._use_fallback or not self.primary.is_available:

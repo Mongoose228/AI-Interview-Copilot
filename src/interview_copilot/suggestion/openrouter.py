@@ -65,6 +65,13 @@ class OpenRouterSuggester:
     def is_configured(self) -> bool:
         return self._client is not None
 
+    async def aclose(self) -> None:
+        if self._client is not None:
+            try:
+                await self._client.close()
+            except Exception as e:
+                logger.debug(f"OpenRouter client close failed: {e}")
+
     async def warm_up(self):
         """Pre-warm the TCP+TLS connection to avoid cold-start latency on first real request."""
         if not self._client:

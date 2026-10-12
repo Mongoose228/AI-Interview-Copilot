@@ -8,6 +8,14 @@
 - Dual-path enabled by default for Whisper: `tiny.en` provisional UI + `base.en` final
 - Dual-channel mic path wired: separate VAD, `speaker=candidate` (no LLM), suppress loopback while mic speaks
 
+### Fixed
+
+- Settings: Deepgram/Groq/Soniox keys now apply without restart (Deepgram stream reopens); old OpenRouter client is closed; DeepL rebuilt on key change
+- Dual-channel mic recorder is opened/closed on its own thread (no cross-thread WASAPI teardown)
+- Soniox reuses its HTTP client
+- Deepgram: no orphaned WebSocket when the stream is closed during reconnect
+- `STT_CLOUD_ENDPOINTING` marked deprecated (ignored); `LLM_MAX_WAIT_FOR_SPEECH_END_S` documented
+
 ### Planned follow-ups
 
 - Live Meet/Zoom latency with local Whisper

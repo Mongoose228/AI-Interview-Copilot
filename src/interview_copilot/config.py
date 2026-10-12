@@ -30,7 +30,8 @@ class Settings(BaseSettings):
     STT_KEYTERMS_FROM_PROFILE: bool = True
     STT_DUAL_PATH_ENABLED: bool = True
     STT_PROVISIONAL_MODEL: str = "tiny.en"
-    # When using cloud streaming, prefer Deepgram utterance boundaries over Silero cuts.
+    # Deprecated, ignored: Deepgram streaming always owns utterance finals (VAD phrases
+    # are not re-transcribed, so audio isn't billed twice). Kept so old .env files load.
     STT_CLOUD_ENDPOINTING: bool = True
 
     DEEPGRAM_API_KEY: str | None = None

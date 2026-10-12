@@ -80,31 +80,40 @@ class DualAudioCapture(AudioCaptureBackend):
                 "set AUDIO_MIC_DEVICE or pick a mic in Settings"
             )
             return
+        # The mic recorder is opened, read and closed on its own thread:
+        # WASAPI/COM objects must not be torn down while another thread is in record().
+        self._mic_thread = threading.Thread(
+            target=self._mic_loop, args=(mic_id,), name="mic-capture", daemon=True
+        )
+        self._mic_thread.start()
+
+    def _mic_loop(self, mic_id: str) -> None:
         try:
             self.mic.start(mic_id)
-            self._mic_thread = threading.Thread(
-                target=self._mic_loop, name="mic-capture", daemon=True
-            )
-            self._mic_thread.start()
-            logger.info(f"Dual-channel mic capture started ({mic_id})")
         except Exception as e:
             logger.warning(f"Mic capture failed to start: {e}")
-
-    def _mic_loop(self) -> None:
-        while not self._stop.is_set() and self.mic.is_running():
+            return
+        logger.info(f"Dual-channel mic capture started ({mic_id})")
+        try:
+            while not self._stop.is_set() and self.mic.is_running():
+                try:
+                    chunk = self.mic.read_chunk()
+                except RuntimeError:
+                    break
+                except Exception as e:
+                    logger.debug(f"Mic read error: {e}")
+                    time.sleep(0.05)
+                    continue
+                with self._mic_lock:
+                    self._mic_queue.append(chunk)
+                    # Bound memory
+                    if len(self._mic_queue) > 50:
+                        self._mic_queue = self._mic_queue[-20:]
+        finally:
             try:
-                chunk = self.mic.read_chunk()
-            except RuntimeError:
-                break
+                self.mic.stop()
             except Exception as e:
-                logger.debug(f"Mic read error: {e}")
-                time.sleep(0.05)
-                continue
-            with self._mic_lock:
-                self._mic_queue.append(chunk)
-                # Bound memory
-                if len(self._mic_queue) > 50:
-                    self._mic_queue = self._mic_queue[-20:]
+                logger.debug(f"Mic stop failed: {e}")
 
     def read_chunk(self) -> AudioChunk:
         return self.loopback.read_chunk()
@@ -122,12 +131,11 @@ class DualAudioCapture(AudioCaptureBackend):
             self.loopback.stop()
         except Exception:
             pass
-        try:
-            self.mic.stop()
-        except Exception:
-            pass
+        # The mic thread stops its own recorder once it sees _stop (≤ one chunk).
         if self._mic_thread and self._mic_thread.is_alive():
             self._mic_thread.join(timeout=2.0)
+            if self._mic_thread.is_alive():
+                logger.warning("Mic capture thread did not stop in time.")
         self._mic_thread = None
 
     def is_running(self) -> bool:
