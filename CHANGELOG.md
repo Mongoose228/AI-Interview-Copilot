@@ -2,25 +2,54 @@
 
 ## Unreleased
 
+### Added
+
+- System tray icon (show/hide, Quit) and system-wide Ctrl+Shift+H hotkey (works while hidden)
+- Soniox API key field in Settings
+- `LLM_MAX_WAIT_FOR_SPEECH_END_S`: upper bound on waiting for VAD speech-end before the LLM call
+- Stateful DSP for 20 ms chunks: smoothed auto-gain (`AutoGain`) and noise gate (`NoiseGate`)
+- Deepgram streaming KeepAlive and automatic reconnect with back-off
+
 ### Changed
 
 - Default / recommended STT path is local Whisper; Deepgram remains available but unused unless opted in (paid)
 - Dual-path enabled by default for Whisper: `tiny.en` provisional UI + `base.en` final
-- Dual-channel mic path wired: separate VAD, `speaker=candidate` (no LLM), suppress loopback while mic speaks
+- Dual-channel mic: separate VAD used only to suppress loopback while you speak; mic audio is not transcribed
+- Escape hides the overlay instead of quitting (quit via ✕ or tray → Quit)
+- Cloud STT engines raise `SttError` on network/HTTP failures, so `STT_FALLBACK` failover actually engages
+- GUI errors are tracked per source (audio / OpenRouter / profile / DeepL); recovering one no longer clears the others
+- Profile combo shows a "select profile" placeholder; controls stay disabled until the pipeline is ready
+- CLI applies keys and settings saved in the GUI
+- Warning logged when the keyring is unavailable and keys are stored in plaintext
 
 ### Fixed
 
+- Candidate speech no longer reaches the LLM with cloud STT (`speaker` kept by Deepgram/Groq/Soniox)
+- Provisional STT no longer runs on the capture thread (caused audio drops)
+- Per-chunk peak normalization pumped the volume; "Light denoise" had no effect on 20 ms chunks
+- Translation failure no longer marks a streaming suggestion as failed (`gather(return_exceptions=True)`)
+- Prompt sanitizer no longer mangles profile text like "Operating system: Linux"
+- Missing local Whisper model no longer breaks startup when it is only the fallback
+- STT stage timing used a duration as the end timestamp
 - Settings: Deepgram/Groq/Soniox keys now apply without restart (Deepgram stream reopens); old OpenRouter client is closed; DeepL rebuilt on key change
 - Dual-channel mic recorder is opened/closed on its own thread (no cross-thread WASAPI teardown)
 - Soniox reuses its HTTP client
 - Deepgram: no orphaned WebSocket when the stream is closed during reconnect
 - `STT_CLOUD_ENDPOINTING` marked deprecated (ignored); `LLM_MAX_WAIT_FOR_SPEECH_END_S` documented
 
+### Refactored
+
+- `pipeline.py` (~1050 lines) split into the `pipeline/` package: `core` (facade, lifecycle, keys/profile),
+  `capture` (audio + VAD thread), `stt_worker`, `phrase_queues`, `orchestrator` (cards/debounce),
+  `processing` (translation + LLM per question). Public API (`from interview_copilot.pipeline import
+  InterviewPipeline`) is unchanged.
+
 ### Planned follow-ups
 
 - Live Meet/Zoom latency with local Whisper
 - Optional cloud STT later if needed
-- Show candidate mic transcripts in UI (currently STT runs but LLM path skips)
+- Optionally transcribe and show candidate mic speech in the UI (today the mic is used only for echo suppression)
+- Fail over from Deepgram streaming to Whisper when the key is rejected mid-session (currently it keeps reconnecting)
 ## 0.3.0
 
 ### Added

@@ -6,16 +6,26 @@ CPU-оптимизация **реализована** (defaults в `.env.example
 
 | Параметр | Значение |
 |----------|----------|
-| `WHISPER_MODEL` | `base.en` |
+| `WHISPER_MODEL` | `base.en` (final) |
+| `STT_DUAL_PATH_ENABLED` / `STT_PROVISIONAL_MODEL` | вкл. / `tiny.en` (provisional) |
 | `VAD_SILENCE_MS` | 350 |
-| `LLM_DEBOUNCE_DELAY_S` | 0.4 |
+| `LLM_DEBOUNCE_DELAY_S` | 0.25 |
+| `LLM_MAX_WAIT_FOR_SPEECH_END_S` | 4.0 |
 | Partial STT | вкл., интервал 800 мс, мин. аудио 700 мс |
+| `AUDIO_CHUNK_MS` | 20 |
 
 Поведение pipeline:
 
 - provisional и final обновляют одну карточку со стабильным ID;
-- очередь partial хранит только последний snapshot; final имеет приоритет;
+- partial распознаёт быстрая `tiny.en`, final — `base.en`; provisional-модель
+  отключается сама, если работает медленнее реального времени (RTF > 1);
+- распознавание идёт только в STT-потоке (`pipeline/stt_worker.py`), поток захвата
+  (`pipeline/capture.py`) никогда не блокируется инференсом;
+- очередь partial хранит только последний snapshot; final имеет приоритет
+  (`pipeline/phrase_queues.py`);
 - в OpenRouter уходит только final-текст;
+- DSP держит состояние между 20-мс чанками (сглаженный AGC и шумовой гейт),
+  без скачков громкости, мешающих VAD и Whisper;
 - в логах есть latency и RTF-метрики без текста (`[Latency]`, `[STT]`).
 
 `WHISPER_CPU_THREADS=4` не менялся. GPU-путь не валидировался (нет NVIDIA GPU в среде разработки).
@@ -36,8 +46,10 @@ CPU-оптимизация **реализована** (defaults в `.env.example
 **Сейчас (текущие defaults):**
 
 - VAD silence 350 мс;
-- Whisper `base.en` + partial snapshots во время речи;
-- debounce 400 мс только перед вызовом LLM; транскрипт показывается раньше.
+- Whisper `base.en` для final + `tiny.en` для partial snapshots во время речи;
+- debounce 250 мс только перед вызовом LLM; транскрипт показывается раньше;
+- после debounce вызов LLM ждёт конца речи, но не дольше 4 с
+  (`LLM_MAX_WAIT_FOR_SPEECH_END_S`), чтобы фоновый шум не блокировал подсказку.
 
 Сетевой запрос OpenRouter влияет на AI-ответ, но не должен задерживать
 показ уже распознанного текста.
@@ -51,10 +63,12 @@ CPU-оптимизация **реализована** (defaults в `.env.example
 ```env
 WHISPER_MODEL=base.en
 VAD_SILENCE_MS=350
-LLM_DEBOUNCE_DELAY_S=0.4
+LLM_DEBOUNCE_DELAY_S=0.25
 WHISPER_BEAM_SIZE=1
 WHISPER_COMPUTE_TYPE=auto
 ```
+
+(На этапе 1 debounce был 0.4 с; в 0.3.0 снижен до 0.25 с.)
 
 Тюнинг при необходимости:
 
@@ -88,6 +102,16 @@ VRAM и стабильность с CPU `int8`.
 - provisional текст на карточке, final после VAD end;
 - один inference за раз, latest-only mailbox для partial;
 - в LLM только финализированный объединённый вопрос.
+
+### Этап 5 — dual-path и разгрузка потока захвата — сделано
+
+- partial распознаёт `tiny.en`, final — `base.en` (`STT_DUAL_PATH_ENABLED`);
+- provisional-распознавание перенесено из потока захвата в STT-поток: раньше
+  инференс tiny-модели блокировал чтение WASAPI и давал пропуски звука;
+- DSP со состоянием между чанками (AGC + noise gate) вместо нормализации
+  каждого 20-мс чанка по отдельности;
+- `pipeline.py` разнесён на пакет `pipeline/` (capture / stt_worker /
+  phrase_queues / orchestrator / processing / core).
 
 ## Метрики и критерии готовности
 

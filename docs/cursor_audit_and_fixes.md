@@ -6,6 +6,8 @@
 **Статус автоматических тестов:** `96 passed in 2.61s` (было 78).  
 **Статус линтера (ruff):** `All checks passed!`
 
+> **Примечание (12.10.2026):** `src/interview_copilot/pipeline.py` позже разнесён на пакет `src/interview_copilot/pipeline/` (`core`, `capture`, `stt_worker`, `phrase_queues`, `orchestrator`, `processing`). Ссылки в отчёте указывают на новые модули.
+
 ---
 
 ## 1. Сводка и контекст
@@ -23,27 +25,27 @@
 #### 1. Речь кандидата уходила в LLM при облачном распознавании
 - **Было:** Облачные движки (`Deepgram`, `Groq`, `Soniox`) создавали объект `Transcript` без передачи поля `speaker`, из-за чего оно по умолчанию выставлялось в `"interviewer"`. В результате ответы кандидата через микрофон попадали в контекст LLM как вопросы интервьюера.
 - **Стало:** Все облачные движки явно проставляют `speaker=getattr(phrase, "speaker", "interviewer")`. В `pipeline.py` фразы с микрофона отсекаются до отправки в очередь транскрибации.
-- **Файлы:** [src/interview_copilot/stt/deepgram.py](file:///c:/Users/Zhenya/Documents/Project/AI%20Interview%20Copilot/src/interview_copilot/stt/deepgram.py), [src/interview_copilot/stt/groq_engine.py](file:///c:/Users/Zhenya/Documents/Project/AI%20Interview%20Copilot/src/interview_copilot/stt/groq_engine.py), [src/interview_copilot/stt/soniox.py](file:///c:/Users/Zhenya/Documents/Project/AI%20Interview%20Copilot/src/interview_copilot/stt/soniox.py), [src/interview_copilot/pipeline.py](file:///c:/Users/Zhenya/Documents/Project/AI%20Interview%20Copilot/src/interview_copilot/pipeline.py).
+- **Файлы:** [src/interview_copilot/stt/deepgram.py](../src/interview_copilot/stt/deepgram.py), [src/interview_copilot/stt/groq_engine.py](../src/interview_copilot/stt/groq_engine.py), [src/interview_copilot/stt/soniox.py](../src/interview_copilot/stt/soniox.py), [src/interview_copilot/pipeline/capture.py](../src/interview_copilot/pipeline/capture.py).
 
 #### 2. Поток Deepgram WebSocket умирал при тишине или обрыве
 - **Было:** При паузе речи >10 секунд со стороны Deepgram закрывался WebSocket. Метод `feed_audio` молча отбрасывал аудиоданные, и распознавание прекращалось до перезапуска приложения.
 - **Стало:** Добавлен отдельный поток `_keepalive_loop`, отправляющий `{"type": "KeepAlive"}` каждые 8 секунд тишины. Реализован цикл реконнекта `_ws_loop` с экспоненциальным бэк-оффом при разрыве соединения.
-- **Файлы:** [src/interview_copilot/stt/deepgram.py](file:///c:/Users/Zhenya/Documents/Project/AI%20Interview%20Copilot/src/interview_copilot/stt/deepgram.py).
+- **Файлы:** [src/interview_copilot/stt/deepgram.py](../src/interview_copilot/stt/deepgram.py).
 
 #### 3. Блокировка аудиозахвата предварительным Whisper (tiny)
 - **Было:** Метод `maybe_provisional` запускался непосредственно внутри цикла захвата аудио, блокируя чтение звука на сотни миллисекунд и вызывая потерю чанков (`data discontinuity`).
 - **Стало:** Предварительное распознавание вынесено в отдельный рабочий воркер `_transcribe_phrase`, не блокирующий WASAPI поток захвата.
-- **Файлы:** [src/interview_copilot/pipeline.py](file:///c:/Users/Zhenya/Documents/Project/AI%20Interview%20Copilot/src/interview_copilot/pipeline.py).
+- **Файлы:** [src/interview_copilot/pipeline/capture.py](../src/interview_copilot/pipeline/capture.py), [src/interview_copilot/pipeline/stt_worker.py](../src/interview_copilot/pipeline/stt_worker.py).
 
 #### 4. Скачки громкости и неработающее шумоподавление DSP
 - **Было:** `normalize_peak` рассчитывался изолированно для каждого 20-мс чанка, усиливая тихий фон и меняя усиление 50 раз в секунду. `light_denoise` требовал минимум 1600 сэмплов и никогда не запускался на 320 сэмплах (20 мс).
 - **Стало:** Добавлены классы `AutoGain` (сглаженная автоматическая регулировка уровня с быстрым нарастанием и медленным спадом) и `NoiseGate` (динамический порог шума с сохранением состояния между чанками и плавным линейным рампом).
-- **Файлы:** [src/interview_copilot/audio/dsp.py](file:///c:/Users/Zhenya/Documents/Project/AI%20Interview%20Copilot/src/interview_copilot/audio/dsp.py).
+- **Файлы:** [src/interview_copilot/audio/dsp.py](../src/interview_copilot/audio/dsp.py).
 
 #### 5. Невозможность вернуть окно после Ctrl+Shift+H и случайное закрытие по Esc
 - **Было:** Шорткат `QShortcut` для `Ctrl+Shift+H` переставал работать, как только окно скрывалось (так как скрытое окно не получает фокус ввода). У окна не было иконки в трее. Клавиша Esc закрывала процесс без диалога.
 - **Стало:** Реализован Win32 глобальный хоткей через `RegisterHotKey` / `WM_HOTKEY` в `nativeEvent()`. Добавлен значок в трее `QSystemTrayIcon` с меню Show/Hide и Quit. Обработка Esc перехвачена, случайное закрытие исключено.
-- **Файлы:** [src/interview_copilot/gui/main_window.py](file:///c:/Users/Zhenya/Documents/Project/AI%20Interview%20Copilot/src/interview_copilot/gui/main_window.py), [src/interview_copilot/gui/app.py](file:///c:/Users/Zhenya/Documents/Project/AI%20Interview%20Copilot/src/interview_copilot/gui/app.py).
+- **Файлы:** [src/interview_copilot/gui/main_window.py](../src/interview_copilot/gui/main_window.py), [src/interview_copilot/gui/app.py](../src/interview_copilot/gui/app.py).
 
 ---
 
@@ -103,7 +105,7 @@
 | `src/interview_copilot/gui/settings_dialog.py` | Поле Soniox, сохранение ключей, группировка полей |
 | `src/interview_copilot/gui/signals.py` | Сигнал `pipeline_ready` |
 | `src/interview_copilot/gui/theme.py` | Токены темы "Instrument Glass" (новый файл) |
-| `src/interview_copilot/pipeline.py` | Воркер частичного STT, таймаут ожидания речи, безопасный `gather`, `reload_api_keys` |
+| `src/interview_copilot/pipeline.py` (сейчас пакет `pipeline/`) | Воркер частичного STT, таймаут ожидания речи, безопасный `gather`, `reload_api_keys` |
 | `src/interview_copilot/settings_store.py` | Поддержка Soniox, предупреждение о незашифрованном keyring |
 | `src/interview_copilot/stt/base.py` | Базовое исключение `SttError` |
 | `src/interview_copilot/stt/deepgram.py` | KeepAlive, WebSocket reconnect, speaker mapping |

@@ -48,6 +48,56 @@ def test_stop_flushes_vad_and_drains(pipeline, fake_audio_capture):
     assert pipeline._threads == []
 
 
+class _OnePhraseVAD(FakeVAD):
+    """Emits a single final phrase on the first chunk."""
+
+    def __init__(self):
+        super().__init__(available=True)
+        self._emitted = False
+
+    def process_chunk(self, chunk):
+        if self._emitted:
+            return []
+        self._emitted = True
+        return [_phrase(uuid.uuid4(), 1, is_final=True)]
+
+
+def test_phrase_flows_capture_to_stt_to_llm(fake_audio_capture, sample_profile, monkeypatch):
+    monkeypatch.setattr("interview_copilot.pipeline.config.LLM_DEBOUNCE_DELAY_S", 0.01)
+    suggester = FakeSuggester(configured=True, answer="An answer")
+    p = InterviewPipeline(
+        audio=fake_audio_capture,
+        vad=_OnePhraseVAD(),
+        stt=FakeWhisperEngine(fake_text="What is a closure?"),
+        translator=None,
+        suggester=suggester,
+        profile_mgr=FakeProfileManager(sample_profile),
+    )
+    suggestions = []
+    p.set_callbacks(
+        transcript_callback=lambda r: None,
+        suggestion_callback=suggestions.append,
+        token_callback=lambda *_: None,
+        error_callback=lambda *a, **k: None,
+        audio_status_callback=lambda *a: None,
+    )
+
+    async def run_until_answer():
+        task = asyncio.create_task(p.start())
+        for _ in range(100):
+            if suggestions:
+                break
+            await asyncio.sleep(0.05)
+        p.stop()
+        await asyncio.wait_for(task, timeout=5.0)
+
+    asyncio.run(run_until_answer())
+
+    assert len(suggester.calls) == 1
+    assert suggestions[-1].transcript == "What is a closure?"
+    assert suggestions[-1].suggestion.answer_en == "An answer"
+
+
 def test_sentinel_unblocks_stt_worker():
     q = queue.Queue(maxsize=5)
     q.put(None)
@@ -92,20 +142,42 @@ def _phrase(phrase_id, revision, *, is_final=False):
 
 def test_partial_mailbox_keeps_latest(pipeline):
     phrase_id = uuid.uuid4()
-    pipeline._enqueue_partial(_phrase(phrase_id, 1))
-    pipeline._enqueue_partial(_phrase(phrase_id, 2))
+    pipeline.queues.put_partial(_phrase(phrase_id, 1))
+    pipeline.queues.put_partial(_phrase(phrase_id, 2))
 
-    latest = pipeline.partial_phrase_queue.get_nowait()
+    latest = pipeline.queues.partials.get_nowait()
     assert latest.revision == 2
-    assert pipeline.partial_phrase_queue.empty()
+    assert pipeline.queues.partials.empty()
 
 
 def test_final_removes_stale_partial_and_has_priority(pipeline):
     phrase_id = uuid.uuid4()
-    pipeline._enqueue_partial(_phrase(phrase_id, 1))
+    pipeline.queues.put_partial(_phrase(phrase_id, 1))
     final = _phrase(phrase_id, 2, is_final=True)
-    pipeline._enqueue_final(final)
+    pipeline.queues.put_final(final)
 
-    assert pipeline.partial_phrase_queue.empty()
-    assert pipeline.phrase_queue.get_nowait() is final
-    assert phrase_id in pipeline._final_phrase_ids
+    assert pipeline.queues.partials.empty()
+    assert pipeline.queues.finals.get_nowait() is final
+    assert phrase_id in pipeline.queues.final_ids
+
+
+def test_finals_are_served_before_partials(pipeline):
+    partial = _phrase(uuid.uuid4(), 1)
+    final = _phrase(uuid.uuid4(), 1, is_final=True)
+    pipeline.queues.put_partial(partial)
+    pipeline.queues.put_final(final)
+
+    assert pipeline.queues.get(timeout=0.1) is final
+    assert pipeline.queues.get(timeout=0.1) is partial
+    with pytest.raises(queue.Empty):
+        pipeline.queues.get(timeout=0.01)
+
+
+def test_partial_superseded_by_queued_final(pipeline):
+    phrase_id = uuid.uuid4()
+    final = _phrase(phrase_id, 2, is_final=True)
+    pipeline.queues.put_final(final)
+
+    assert pipeline.queues.is_superseded(_phrase(phrase_id, 1))
+    pipeline.queues.mark_done(final)
+    assert not pipeline.queues.is_superseded(_phrase(phrase_id, 1))
